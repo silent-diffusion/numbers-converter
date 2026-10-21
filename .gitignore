@@ -6,3 +6,5 @@ py/build/
 py/dist/
 *.spec
 reference/
+__pycache__/
+*.pyc
