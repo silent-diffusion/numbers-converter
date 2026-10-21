@@ -24,15 +24,16 @@ Each Numbers table becomes an Excel sheet (with the table's name in a title row 
 
 - **Values** — numbers, text, dates, durations, checkboxes
 - **Table styles** — the table theme's lines, header/footer colours and banded rows, the sheet's page colour, and Numbers' own row heights and column widths (in points, so text fits as it does in Numbers). Excel's gridlines are turned off, as Numbers shows none.
-- **Formatting** — fonts, sizes, bold/italic/underline/strikethrough, text and fill colours, cell borders, alignment, text wrapping, merged cells, frozen header rows/columns
+- **Formatting** — fonts, sizes, bold/italic/underline/strikethrough, text and fill colours, cell borders, alignment, text wrapping, merged cells, header rows/columns frozen where Numbers freezes them
 - **Number formats** — currency (including accounting style), percentages, decimals, thousands separators, negative styles, fractions, durations, date and time formats
 - **Cell extras** — comments (as Excel notes), links, bold/italic/coloured words within a cell, bullet and numbered lists, hidden rows and columns, filters (as Excel AutoFilter)
 - **Form controls** — checkboxes (Excel checkboxes), pop-up menus (dropdown lists), sliders, steppers and star ratings (as number-range rules)
 - **Formulas** — rewritten as Excel formulas so they keep calculating, including references to other tables and to columns by their header name (`SUM(Amount)`). Formulas that use Apple-only functions, functions that behave differently in Excel, or approximate lookups on unsorted data (where Excel's answer can differ) keep their last value instead, and the app tells you how many.
 - **Pivot tables** — newer versions of Numbers don't save pivot totals in the file, so the app recalculates them from the pivot's rules and its source data (grouping by value, date part, etc.; sum, average, count, minimum, maximum). Pivot results are saved as values, not as an Excel pivot table. Any pivot it can't reproduce exactly (e.g. "show as percentage" or running totals) is reported and its totals are left blank rather than guessed.
 
-Not carried over yet: **charts, images, shapes and text boxes** (the app tells you when a file has charts, images or shapes), conditional highlighting, and the grouped view of tables with categories (their rows come out in their original order).
-To keep charts, export from Numbers itself (**File → Export To → Excel** on a Mac, iPhone, iPad or iCloud.com).
+- **Charts** — column, bar, stacked, line, area, pie, donut, scatter, radar, 2-axis and mixed charts become real Excel charts that read the converted cells, so they update when the data changes. Each keeps its place beside, above or below its table (rows are added above a table to make room for charts over it, as Apple's own export does), its colours, title, legend, gaps, value labels, axis titles and gridlines. The preview shows them where they'll be. 3D charts come out flat, and interactive charts show all their data sets at once. Bubble charts aren't converted yet; the app tells you when a file has one.
+
+Not carried over yet: **images, shapes and text boxes** (the app tells you when a file has images or shapes), conditional highlighting, and the grouped view of tables with categories (their rows come out in their original order).
 
 Password-protected files ask for the password (and show its hint); it's only kept in memory while the app is open.
 Files a Mac saved as a *package* (a folder ending in `.numbers`) can be dragged onto the window.
@@ -49,7 +50,7 @@ Conversion itself never uses the internet; only the update check does.
 ## Develop
 
 The Numbers reader and Excel writer is a Python helper ([`py/numbers_tool.py`](py/numbers_tool.py), with pivot
-recalculation in [`py/pivots.py`](py/pivots.py), built on
+recalculation in [`py/pivots.py`](py/pivots.py) and charts in [`py/charts.py`](py/charts.py), built on
 [numbers-parser](https://github.com/masaccio/numbers-parser) and [XlsxWriter](https://xlsxwriter.readthedocs.io/)).
 The installer ships it as a standalone PyInstaller build, so users don't need Python.
 
@@ -66,7 +67,8 @@ npm run dist     # build the helper and dist/NumbersConverter-Setup-<version>.ex
 
 [`tools/compare_with_apple.py`](tools/compare_with_apple.py) converts every `X.numbers` in a folder that also has
 Apple's `X.xlsx` export (File → Export To → Excel in Numbers), opens both in Excel, and scores how closely each
-cell matches: text, formulas, fonts, fills, borders, alignment, number formats, row heights and column widths.
+cell matches: text, formulas, fonts, fills, borders, alignment, number formats, row heights and column widths; and
+each chart: its type, and the values and labels Excel reads for each series.
 Needs Windows with Excel. Pivot tables are skipped (Apple writes Excel pivot tables, laid out Excel's way).
 
 ```bash

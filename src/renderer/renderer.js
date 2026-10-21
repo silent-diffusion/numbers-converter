@@ -203,10 +203,12 @@ function renderPreview(f) {
   }
 
   const sheet = sheets[f.sheet];
-  if (!sheet.rows.length) {
+  if (!sheet.rows.length && !sheet.charts?.length) {
     grid.replaceChildren(el('div', 'grid-message', 'This sheet is empty.'));
   } else {
-    grid.replaceChildren(buildTable(sheet));
+    const area = buildSheet(sheet);
+    grid.replaceChildren(area);
+    placeCharts(area);
     grid.scrollTo(0, 0);
   }
 
@@ -298,6 +300,43 @@ function applyStyle(td, s) {
   }
 }
 
+// A sheet as it will look in Excel: the table, with its charts drawn over the sheet where they'll be.
+function buildSheet(sheet) {
+  const area = el('div', 'sheet-area');
+  if (sheet.rows.length) area.append(buildTable(sheet));
+  if (sheet.charts?.length) {
+    const layer = el('div', 'chart-layer');
+    for (const chart of sheet.charts) {
+      let drawing;
+      try {
+        drawing = drawChart(chart);
+      } catch (err) {
+        console.error('Could not draw a chart preview', err); // the saved file still has it
+        continue;
+      }
+      drawing.style.left = `${chart.x}px`;
+      drawing.style.top = `${chart.y}px`;
+      layer.append(drawing);
+    }
+    area.append(layer);
+  }
+  return area;
+}
+
+// Chart positions are measured from the sheet's first cell (A1), which sits below and right of
+// the row and column labels; once the sheet is on the page, line the charts up with it.
+function placeCharts(area) {
+  const layer = area.querySelector('.chart-layer');
+  if (!layer) return;
+  const first = area.querySelector('tbody td');
+  if (first) {
+    const origin = area.getBoundingClientRect();
+    const cell = first.getBoundingClientRect();
+    layer.style.left = `${cell.left - origin.left}px`;
+    layer.style.top = `${cell.top - origin.top}px`;
+  }
+}
+
 function buildTable(sheet) {
   // Hidden rows and columns are left out, as in Numbers; row and column labels keep their numbering.
   const hiddenRows = new Set(sheet.hiddenRows || []);
@@ -323,9 +362,20 @@ function buildTable(sheet) {
 
   const spans = new Map(sheet.merges.map(([r1, c1, r2, c2]) => [`${r1},${c1}`, [r2 - r1 + 1, c2 - c1 + 1]]));
   const body = el('tbody');
-  // The table's name, when Numbers shows it, sits in its own row above the table (as in the saved file).
-  const top = sheet.title ? 1 : 0;
-  if (sheet.title) body.append(titleRow(sheet, visibleCols.length));
+  // Rows making room for charts above the table, then the table's name when Numbers shows it, each
+  // in rows of their own above the table (as in the saved file).
+  const bands = sheet.bands || [];
+  bands.forEach((height, i) => {
+    const tr = el('tr', 'band-row');
+    tr.style.height = `${height * PT_TO_PX}px`;
+    tr.append(el('th', null, String(i + 1)));
+    const td = el('td');
+    td.colSpan = Math.max(visibleCols.length, 1);
+    tr.append(td);
+    body.append(tr);
+  });
+  const top = bands.length + (sheet.title ? 1 : 0);
+  if (sheet.title) body.append(titleRow(sheet, visibleCols.length, bands.length + 1));
   sheet.rows.forEach((row, r) => {
     if (hiddenRows.has(r)) return;
     const tr = el('tr');
@@ -363,14 +413,14 @@ function buildTable(sheet) {
   return table;
 }
 
-function titleRow(sheet, span) {
-  const { text, font, size, bold, italic, color } = sheet.title;
+function titleRow(sheet, span, number) {
+  const { text, font, size, bold, italic, color, height } = sheet.title;
   const tr = el('tr', 'title-row');
-  tr.append(el('th', null, '1'));
+  tr.append(el('th', null, String(number)));
   const td = el('td', null, text);
   td.colSpan = span;
   applyStyle(td, { font, size, b: bold, i: italic, color, bg: sheet.background, ha: 'center', va: 'middle' });
-  tr.style.height = `${size * 2.3 * PT_TO_PX}px`;
+  tr.style.height = `${(height || size * 2.3) * PT_TO_PX}px`;
   tr.append(td);
   return tr;
 }

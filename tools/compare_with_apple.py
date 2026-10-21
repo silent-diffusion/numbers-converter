@@ -193,11 +193,43 @@ def compare_file(excel, numbers_path, apple_path, ours_path, max_rows, totals, e
                         record(totals, file_scores, file_totals, examples, key, ok,
                                f"{name} [{a_ws.Name}] {col_name(c)}{r + 1}: apple {a[key]!r} ours {o[key]!r}"
                                + (f"  text={a['text'][:30]!r}" if key not in ("text",) else ""))
+        # Charts: matched by title (else in order), comparing type and the data Excel reads for each series.
+        mine = chart_list(ours)
+        for a in chart_list(apple):
+            o = next((c for c in mine if c["title"] == a["title"]), mine[0] if mine else None)
+            label = f"{name} chart {a['title']!r}"
+            record(totals, file_scores, file_totals, examples, "chart", o is not None, f"{label}: missing from ours")
+            if o is None:
+                continue
+            mine.remove(o)
+            record(totals, file_scores, file_totals, examples, "chart type", a["type"] == o["type"],
+                   f"{label}: apple type {a['type']} ours {o['type']}")
+            record(totals, file_scores, file_totals, examples, "chart data", a["values"] == o["values"],
+                   f"{label}: apple {a['values']} ours {o['values']}")
+            record(totals, file_scores, file_totals, examples, "chart labels", a["labels"] == o["labels"],
+                   f"{label}: apple {a['labels']} ours {o['labels']}")
     finally:
         apple.Close(False)
         ours.Close(False)
     scored = {k: f"{100 * file_scores[k] / file_totals[k]:.0f}%" for k in file_totals}
     print(f"  {name}: " + ", ".join(f"{k} {v}" for k, v in scored.items()))
+
+
+def chart_list(wb):
+    """Every chart in a workbook: its title, Excel chart type, and the values and category labels
+    Excel reads for each series (so live links are checked, not just copied numbers)."""
+    found = []
+    for ws in wb.Worksheets:
+        for i in range(1, ws.ChartObjects().Count + 1):
+            chart = ws.ChartObjects(i).Chart
+            values, labels = [], []
+            for j in range(1, chart.SeriesCollection().Count + 1):
+                series = chart.SeriesCollection(j)
+                values.append([round(v, 6) if isinstance(v, float) else v for v in (series.Values or ())])
+                labels.append([str(x) for x in (series.XValues or ())])
+            found.append({"title": chart.ChartTitle.Text if chart.HasTitle else None, "type": chart.ChartType,
+                          "values": values, "labels": labels})
+    return found
 
 
 def record(totals, file_scores, file_totals, examples, key, ok, example):

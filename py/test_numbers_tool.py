@@ -13,6 +13,7 @@ from numbers_parser.generated import TSCEArchives_pb2 as TSCE
 from openpyxl import load_workbook
 
 sys.path.insert(0, os.path.dirname(__file__))
+import charts  # noqa: E402
 import numbers_tool as nt  # noqa: E402
 import pivots  # noqa: E402
 
@@ -307,9 +308,86 @@ def test_format_number():
     assert nt.format_number(476.0, None) == "476"
 
 
-def test_charts_are_reported():
-    data = nt.preview(fixture("issue-9"))
-    assert data["unsupported"]["charts"] == 11
+def chart_on(ws, kind=None):
+    """The charts on a converted sheet, left to right, optionally only those of one kind."""
+    found = sorted(ws._charts, key=lambda c: (c.anchor._from.col, c.anchor._from.colOff))
+    return [c for c in found if kind is None or c.tagname == kind]
+
+
+def test_charts_convert():
+    # issue-9 has a chart of each kind Numbers offers. Excel has no bubble charts, so that one is reported.
+    result, wb = convert("issue-9")
+    assert result["charts"] == 10 and result["unsupported"]["charts"] == 1
+    book = nt.load(fixture("issue-9"))
+
+    # Charts read the table cells, so they stay live: here B2:B6 of the table, below its title row.
+    ws = wb["Column and Bar Charts"]
+    column, bar = chart_on(ws, "barChart")
+    top = book.top[ws.title]
+    assert bar.barDir == "bar" and column.barDir == "col"
+    assert bar.series[0].val.numRef.f == f"'Column and Bar Charts'!$B${2 + top}:$B${6 + top}"
+    assert bar.series[0].cat.strRef.f == f"'Column and Bar Charts'!$A${2 + top}:$A${6 + top}"
+    assert [ws[f"B{r + top}"].value for r in range(2, 7)] == [11, 15, 9, 14, 21]
+    assert bar.x_axis.scaling.orientation == "maxMin"  # Numbers lists bars from the top
+    # One data set, one bar per series: drawn as one series with a colour per bar, named underneath.
+    assert len(column.series) == 1 and len(column.series[0].dPt) == 5
+    assert column.series[0].dLbls.showVal  # Numbers shows the values on the bars
+
+    pie, = chart_on(wb["Pie and Donut Charts"], "pieChart")
+    donut, = chart_on(wb["Pie and Donut Charts"], "doughnutChart")
+    assert len(pie.series) == 1 and len(pie.series[0].dPt) == 5 and pie.series[0].dLbls.showPercent
+    assert donut.holeSize == 50
+
+    combined, = chart_on(wb["2-Axis Chart"])
+    assert {c.tagname for c in combined._charts} == {"barChart", "lineChart"}
+    scatter, = chart_on(wb["Scatter Chart"])
+    assert scatter.series[0].xVal.numRef.f.startswith("'Scatter Chart'!$A$")
+
+    # A chart above its table gets rows of its own height above it; the table and every
+    # reference to it move down to match.
+    ws = wb["Interactive Chart"]
+    interactive, = chart_on(ws)
+    assert book.bands[ws.title] and book.top[ws.title] == len(book.bands[ws.title]) + 1
+    assert interactive.anchor._from.row < len(book.bands[ws.title])
+    assert at("issue-9", ws, "A2").value == "Region 1"
+    assert interactive.series[0].val.numRef.f == f"'Interactive Chart'!$B${2 + book.top[ws.title]}:$E${2 + book.top[ws.title]}"
+
+    sheets = {s["name"]: s for s in nt.preview(fixture("issue-9"))["sheets"]}
+    assert [c["kind"] for c in sheets["Column and Bar Charts"]["charts"]] == ["column", "bar"]
+    assert sheets["Interactive Chart"]["bands"] == book.bands["Interactive Chart"]
+
+
+def test_chart_links():
+    # This chart's data was stored as a range of row IDs plus a reference to cells since deleted,
+    # which Numbers ignores.
+    result, wb = convert("issue-66-collab")
+    assert result["charts"] == 1 and result["unsupported"]["charts"] == 0
+    chart, = chart_on(wb["Credit"])
+    assert chart.grouping == "stacked"
+    assert [s.val.numRef.f for s in chart.series] == ["Credit!$B$10:$B$15", "Credit!$C$10:$C$15", "Credit!$D$10:$D$15"]
+
+    # Cells in a run become a range; scattered cells on one sheet a union of ranges, as in Apple's
+    # export; cells on several sheets, or a chart's own copy of values, go on a hidden sheet.
+    columns = []
+
+    class Data:
+        def column(self, values, formats=None):
+            columns.append(values)
+            return ["Chart Data", 0, len(columns) - 1, len(values) - 1, len(columns) - 1]
+
+    place = lambda cell: (cell[0], cell[1], cell[2])  # noqa: E731  (sheet, row, col) stand in for table cells
+    info = lambda cell: (7, None)  # noqa: E731
+    assert charts.reference([("S", 1, 1), ("S", 2, 1), ("S", 3, 1)], [], Data(), place, info) == ["S", 1, 1, 3, 1]
+    assert charts.reference([("S", 1, 1), ("S", 1, 3), ("S", 1, 5)], [], Data(), place, info) == "=(S!$B$2,S!$D$2,S!$F$2)"
+    assert charts.reference([("S", 1, 1), ("T", 1, 1)], [], Data(), place, info) == ["Chart Data", 0, 0, 1, 0]
+    assert columns[0] == [("=S!$B$2", 7), ("=T!$B$2", 7)]
+    assert charts.reference(None, [1.5, 2.5], Data(), place, info) == ["Chart Data", 0, 1, 1, 1]
+
+
+def test_font_names():
+    assert nt.font_name("Helvetica Neue") == "Arial" and nt.font_name("HelveticaNeue-Medium") == "Arial"
+    assert nt.font_name("AvenirNext-DemiBold") == "Segoe UI" and nt.font_is_bold("AvenirNext-DemiBold")
+    assert nt.font_name("Georgia-Bold") == "Georgia" and not nt.font_is_bold("Georgia")
 
 
 def test_custom_formats_convert():

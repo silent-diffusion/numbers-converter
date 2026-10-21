@@ -22,6 +22,7 @@ import xlsxwriter
 from numbers_parser import Document
 from xlsxwriter.utility import xl_range_abs
 
+import charts
 import extras
 import pivots
 import strokes
@@ -214,15 +215,19 @@ class Book:
     def __init__(self, doc):
         self.doc = doc
         self.tables = []  # (excel_name, sheet_name, table)
-        used = set()
+        self.used_names = set()
+        sheet_tables, sheet_names = {}, {}  # by Numbers sheet id
         for sheet in doc.sheets:
             tables = list(sheet.tables)
             background = sheet_background(doc._model, sheet)
+            sheet_names[sheet._sheet_id] = sheet.name
             for table in tables:
                 if background:
                     SHEET_BACKGROUNDS[(id(table._model), table._table_id)] = background
                 label = sheet.name if len(tables) == 1 else f"{sheet.name} - {table.name}"
-                self.tables.append((unique_sheet_name(label, used), sheet.name, table))
+                excel_name = unique_sheet_name(label, self.used_names)
+                self.tables.append((excel_name, sheet.name, table))
+                sheet_tables.setdefault(sheet._sheet_id, []).append((excel_name, table))
         if not self.tables:
             raise UserError("No tables found in this file.")
         # Table name lookup for cross-table formula references.
@@ -231,13 +236,31 @@ class Book:
             self.by_table[(sheet_name, table.name)] = excel_name
             self.by_table.setdefault((None, table.name), excel_name)
             self.by_sheet.setdefault(sheet_name, excel_name)
-        # Where each table goes: its sheet, and how many rows sit above it (the title row Numbers
-        # shows when a table's name is visible).
         self.table_of = {excel_name: table for excel_name, _, table in self.tables}
         self.excel_of = {table._table_id: excel_name for excel_name, _, table in self.tables}
         self.titles = {excel_name: table_title(table) for excel_name, _, table in self.tables}
-        self.top = {excel_name: 1 if title else 0 for excel_name, title in self.titles.items()}
         self.unsupported = count_drawables(doc)
+        # Charts, and where they go: beside or above their table (in rows added above it), or on a
+        # sheet of their own when their Numbers sheet has no table.
+        self.charts, self.bands, self.chart_sheets = [], {}, {}
+        try:
+            self.charts, self.unsupported["charts"] = charts.read_charts(self, CHART_TOOLS)
+            tools = SimpleNamespace(**vars(CHART_TOOLS),
+                                    size=lambda table: table_size(table, self.titles[self.excel_of[table._table_id]]))
+            charts.layout(self, sheet_tables, sheet_names, lambda name: unique_sheet_name(name, self.used_names), tools)
+        except Exception:  # never let a chart stop the tables converting
+            self.charts, self.bands, self.chart_sheets = [], {}, {}
+            self.unsupported["charts"] = count_drawables(doc)["charts"]
+        # Each table's place on its sheet: how many rows sit above it (rows making room for charts,
+        # then the title row Numbers shows when a table's name is visible).
+        self.top = {excel_name: len(self.bands.get(excel_name, [])) + (1 if title else 0)
+                    for excel_name, title in self.titles.items()}
+        # Worksheets in Numbers' order: each sheet's tables, or its charts when it has no table.
+        self.sheet_order = []
+        for sheet in doc.sheets:
+            self.sheet_order += [excel_name for excel_name, _ in sheet_tables.get(sheet._sheet_id, [])]
+            if sheet._sheet_id in self.chart_sheets:
+                self.sheet_order.append(self.chart_sheets[sheet._sheet_id])
         # Pivot tables whose summary values have to be recalculated: {table_id: {(row, col): (value, source cell)}}
         self.pivot_values = {}
         for _, _, table in self.tables:
@@ -252,6 +275,21 @@ class Book:
                     self.unsupported["pivots"] += 1
 
 
+# What charts.py needs from here: a cell's text as Numbers shows it and its Excel number format, and
+# the Windows font for a Mac font. (Lambdas, as the functions are defined further down.)
+CHART_TOOLS = SimpleNamespace(text=lambda cell: "" if isinstance(cell, (EmptyCell, MergedCell)) else formatted(cell).strip(),
+                              font=lambda name: font_name(name), bold=lambda name: font_is_bold(name),
+                              number_format=lambda cell: excel_number_format(cell))
+
+
+def table_size(table, title):
+    """(width, height) in points of a table as written to Excel: its visible columns and rows, and
+    its title row if it has one."""
+    hidden_cols, hidden_rows = extras.hidden(table, columns=True), extras.hidden(table, columns=False)
+    width = sum(w for c, w in enumerate(header_sizes(table, columns=True)) if c not in hidden_cols)
+    height = sum(h for r, h in enumerate(header_sizes(table, columns=False)) if r not in hidden_rows)
+    return width, height + (title_height(title) if title else 0)
+
 
 def table_title(table):
     """{text, font, size, bold, italic, color} for a table whose name Numbers shows above it, else None."""
@@ -262,10 +300,14 @@ def table_title(table):
             return None
         style = model.objects[tm.table_name_style.identifier]
         colour = rgb_hex(rgb_from_proto(model.char_property(style, "font_color")))
-        return {"text": table.name, "font": font_name(model.char_property(style, "font_name")) or "Arial",
-                "size": round(model.char_property(style, "font_size"), 1),
-                "bold": bool(model.char_property(style, "bold")), "italic": bool(model.char_property(style, "italic")),
-                "color": None if colour == "#000000" else colour}
+        font = model.char_property(style, "font_name")
+        title = {"text": table.name, "font": font_name(font) or "Arial",
+                 "size": round(model.char_property(style, "font_size"), 1),
+                 "bold": bool(model.char_property(style, "bold")) or font_is_bold(font),
+                 "italic": bool(model.char_property(style, "italic")),
+                 "color": None if colour == "#000000" else colour}
+        title["height"] = title_height(title)
+        return title
     except Exception:
         return None
 
@@ -395,9 +437,22 @@ def rgb_hex(color):
 
 
 def font_name(name):
+    """The font Excel should use: a Windows stand-in for Mac-only fonts. Numbers sometimes names
+    fonts by their PostScript name (AvenirNext-DemiBold), whose family Excel knows as "Avenir Next"."""
     if not name:
         return None
-    return FONT_SUBSTITUTES.get(name, FONT_SUBSTITUTES.get(name.split("-")[0], name))
+    if name in FONT_SUBSTITUTES:
+        return FONT_SUBSTITUTES[name]
+    if "-" not in name:
+        return name
+    family = name.split("-")[0]
+    spaced = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", family)
+    return FONT_SUBSTITUTES.get(family, FONT_SUBSTITUTES.get(spaced, spaced))
+
+
+def font_is_bold(name):
+    """Whether a PostScript font name is a bold weight (AvenirNext-DemiBold, HelveticaNeue-Bold)."""
+    return bool(name) and "-" in name and bool(re.search(r"Bold|Heavy|Black|Demi", name.split("-", 1)[1]))
 
 
 _style_cache = {}
@@ -573,10 +628,18 @@ def is_numeric(cell):
 
 def preview(path, password=None):
     """Cells are sent as plain text, [text, style index], or [text, style index, extras] where
-    extras may hold "runs" ([[text, style index], ...]), "link", "note" and "control"."""
+    extras may hold "runs" ([[text, style index], ...]), "link", "note" and "control". Each sheet
+    also lists the charts on it (see charts.describe) and the rows above its table ("bands": rows
+    making room for charts, then "title")."""
     book = load(path, password)
     sheets = []
-    for excel_name, _sheet, table in book.tables:
+    for excel_name in book.sheet_order:
+        sheet_charts = [charts.describe(chart) for chart in book.charts if chart.host == excel_name]
+        table = book.table_of.get(excel_name)
+        if table is None:  # a Numbers sheet with charts but no tables
+            sheets.append({"name": excel_name, "rows": [], "charts": sheet_charts, "bands": [], "colWidths": [],
+                           "rowHeights": [], "totalRows": 0, "totalCols": 0})
+            continue
         rows_shown = min(table.num_rows, PREVIEW_MAX_ROWS)
         cols_shown = min(table.num_cols, PREVIEW_MAX_COLS)
         styles, style_ids = [{}], {"{}": 0}  # index 0 = unstyled; such cells are sent as plain strings
@@ -625,6 +688,8 @@ def preview(path, password=None):
         sheets.append({
             "name": excel_name,
             "title": book.titles.get(excel_name),
+            "bands": book.bands.get(excel_name, []),
+            "charts": sheet_charts,
             "background": SHEET_BACKGROUNDS.get((id(table._model), table._table_id)),
             "rows": rows,
             "styles": styles,
@@ -1294,18 +1359,23 @@ class OffsetSheet:
         return shifted
 
 
-def write_title(ws, title, table, formats, background):
+def title_height(title):
+    """Height of a table's title row: the line height of its font plus Numbers' spacing (Apple's
+    export: 27.5pt for 12pt Helvetica, 30pt for 12pt Avenir)."""
+    return round(title["size"] * (2.5 if title["font"] == "Segoe UI" else 2.3) * 2) / 2
+
+
+def write_title(ws, row, title, table, formats, background):
     """The table's name in a row above it, merged across the table, as Numbers shows it."""
     style = {"font": title["font"], "size": title["size"], "ha": "center", "va": "middle",
              "b": 1 if title["bold"] else 0, "i": 1 if title["italic"] else 0,
              "color": title["color"], "bg": background}
     fmt = formats.get({k: v for k, v in style.items() if v}, None)
-    # Line height of the title's font plus Numbers' spacing (Apple's export: 27.5pt for 12pt Helvetica).
-    ws.set_row(0, round(title["size"] * (2.5 if title["font"] == "Segoe UI" else 2.3) * 2) / 2)
+    ws.set_row(row, title_height(title))
     if table.num_cols > 1:
-        ws.merge_range(0, 0, 0, table.num_cols - 1, title["text"], fmt)
+        ws.merge_range(row, 0, row, table.num_cols - 1, title["text"], fmt)
     else:
-        ws.write_string(0, 0, title["text"], fmt)
+        ws.write_string(row, 0, title["text"], fmt)
 
 
 def convert(path, out, password=None):
@@ -1316,59 +1386,85 @@ def convert(path, out, password=None):
     lists = ListSheet(workbook)
     stats = {"formulas": 0, "formulasAsValues": 0}
     refs = referenced_cells(book)
+    worksheets = {}
 
-    for excel_name, sheet_name, table in book.tables:
-        sheet = workbook.add_worksheet(excel_name)
+    for excel_name in book.sheet_order:
+        sheet = worksheets[excel_name] = workbook.add_worksheet(excel_name)
         sheet.hide_gridlines(2)  # Numbers shows no grid outside a table's own lines, which are drawn as borders
-        top = book.top.get(excel_name, 0)
-        if top:
-            write_title(sheet, book.titles[excel_name], table, formats,
-                        SHEET_BACKGROUNDS.get((id(table._model), table._table_id)))
-        ws = OffsetSheet(sheet, top)
-        sheet_refs = refs.get(excel_name, [])
-        # Sizes stay in points, like the fonts, so text fits its cells as it does in Numbers.
-        hidden_cols = extras.hidden(table, columns=True)
-        for c, width in enumerate(header_sizes(table, columns=True)):
-            ws.set_column_pixels(c, c, max(8, round(width * 4 / 3)), None, {"hidden": c in hidden_cols})
-        hidden_rows = extras.hidden(table, columns=False)
-        for r, height in enumerate(header_sizes(table, columns=False)):
-            ws.set_row(r, height, None, {"hidden": r in hidden_rows})
-        if table.num_header_rows or table.num_header_cols:
-            ws.freeze_panes(table.num_header_rows, table.num_header_cols)
-        if extras.filter_enabled(table) and table.num_rows > 1:
-            header = max(table.num_header_rows - 1, 0)
-            ws.autofilter(header, 0, table.num_rows - 1, table.num_cols - 1)
+        if excel_name in book.table_of:
+            write_table(sheet, excel_name, book, formats, lists, stats, refs)
 
-        merged_anchors = {}
-        for rng in table.merge_ranges:
-            r1, c1, r2, c2 = parse_range(rng)
-            merged_anchors[(r1, c1)] = (r2, c2)
+    def cell_info(cell):  # a table cell's value and number format, for chart data copied to another sheet
+        table_id, r, c = cell
+        source = book.table_of[book.excel_of[table_id]]._data[r][c]
+        value = cached_value(source) if not isinstance(source, (EmptyCell, MergedCell, ErrorCell)) else None
+        return value, formats.get({}, excel_number_format(source))
 
-        computed = book.pivot_values.get(table._table_id, {})
-        for r, row in enumerate(table_rows(table)):
-            for c, cell in enumerate(row):
-                if isinstance(cell, MergedCell):
-                    continue
-                style = cell_style(cell)
-                if (r, c) in computed:  # recalculated pivot summary
-                    value, source = computed[(r, c)]
-                    fmt = formats.get(style, source and excel_number_format(source))
-                    if value is None:
-                        ws.write_blank(r, c, None, fmt)
-                    else:
-                        ws.write_number(r, c, value, fmt)
-                    continue
-                num_format = excel_number_format(cell)
-                fmt = formats.get(style, num_format)
-                if (r, c) in merged_anchors:
-                    r2, c2 = merged_anchors[(r, c)]
-                    ws.merge_range(r, c, r2, c2, None, fmt)
-                if not write_special(ws, r, c, cell, style, fmt, formats, lambda r=r, c=c: is_referenced(sheet_refs, r + top, c)):
-                    write_cell(ws, r, c, cell, fmt, book, sheet_name, stats)
-                add_cell_extras(ws, r, c, cell, lists)
-
+    stats["charts"] = charts.write_charts(workbook, book, worksheets, cell_info,
+                                          lambda name: unique_sheet_name(name, set(book.used_names)))
     workbook.close()
-    return {"outputPath": out, "sheets": len(book.tables), "unsupported": book.unsupported, **stats}
+    return {"outputPath": out, "sheets": len(book.sheet_order), "unsupported": book.unsupported, **stats}
+
+
+def write_table(sheet, excel_name, book, formats, lists, stats, refs):
+    table = book.table_of[excel_name]
+    sheet_name = next(name for excel, name, _ in book.tables if excel == excel_name)
+    bands = book.bands.get(excel_name, [])
+    for r, height in enumerate(bands):  # room for the charts above the table
+        sheet.set_row(r, height)
+    top = book.top.get(excel_name, 0)
+    if top > len(bands):
+        write_title(sheet, len(bands), book.titles[excel_name], table, formats,
+                    SHEET_BACKGROUNDS.get((id(table._model), table._table_id)))
+    ws = OffsetSheet(sheet, top)
+    sheet_refs = refs.get(excel_name, [])
+    # Sizes stay in points, like the fonts, so text fits its cells as it does in Numbers.
+    hidden_cols = extras.hidden(table, columns=True)
+    for c, width in enumerate(header_sizes(table, columns=True)):
+        ws.set_column_pixels(c, c, max(8, round(width * 4 / 3)), None, {"hidden": c in hidden_cols})
+    hidden_rows = extras.hidden(table, columns=False)
+    for r, height in enumerate(header_sizes(table, columns=False)):
+        ws.set_row(r, height, None, {"hidden": r in hidden_rows})
+    # Header rows and columns stay in view where Numbers freezes them (not with charts above the
+    # table: those rows would be frozen too).
+    tm = table._model.objects[table._table_id]
+    frozen_rows = table.num_header_rows if tm.header_rows_frozen and not bands else 0
+    frozen_cols = table.num_header_cols if tm.header_columns_frozen else 0
+    if frozen_rows:
+        ws.freeze_panes(frozen_rows, frozen_cols)
+    elif frozen_cols:
+        sheet.freeze_panes(0, frozen_cols)
+    if extras.filter_enabled(table) and table.num_rows > 1:
+        header = max(table.num_header_rows - 1, 0)
+        ws.autofilter(header, 0, table.num_rows - 1, table.num_cols - 1)
+
+    merged_anchors = {}
+    for rng in table.merge_ranges:
+        r1, c1, r2, c2 = parse_range(rng)
+        merged_anchors[(r1, c1)] = (r2, c2)
+
+    computed = book.pivot_values.get(table._table_id, {})
+    for r, row in enumerate(table_rows(table)):
+        for c, cell in enumerate(row):
+            if isinstance(cell, MergedCell):
+                continue
+            style = cell_style(cell)
+            if (r, c) in computed:  # recalculated pivot summary
+                value, source = computed[(r, c)]
+                fmt = formats.get(style, source and excel_number_format(source))
+                if value is None:
+                    ws.write_blank(r, c, None, fmt)
+                else:
+                    ws.write_number(r, c, value, fmt)
+                continue
+            num_format = excel_number_format(cell)
+            fmt = formats.get(style, num_format)
+            if (r, c) in merged_anchors:
+                r2, c2 = merged_anchors[(r, c)]
+                ws.merge_range(r, c, r2, c2, None, fmt)
+            if not write_special(ws, r, c, cell, style, fmt, formats, lambda r=r, c=c: is_referenced(sheet_refs, r + top, c)):
+                write_cell(ws, r, c, cell, fmt, book, sheet_name, stats)
+            add_cell_extras(ws, r, c, cell, lists)
 
 
 def write_special(ws, r, c, cell, style, fmt, formats, referenced=lambda: False):

@@ -207,7 +207,10 @@ li.error .status-icon, li.error .file-meta { color: var(--danger); }
 .grid tbody th { position: sticky; left: 0; z-index: 1; text-align: right; }
 .grid thead th.corner { left: 0; z-index: 3; }
 .grid td { position: relative; }
-.grid tr.title-row td { border-color: transparent; }
+.grid tr.title-row td, .grid tr.band-row td { border-color: transparent; }
+.sheet-area { position: relative; width: max-content; min-width: 100%; min-height: 100%; }
+.chart-layer { position: absolute; left: 12px; top: 12px; pointer-events: none; }
+.chart-layer .chart { position: absolute; overflow: visible; }
 .grid td.has-link { color: #0563C1; text-decoration: underline; cursor: help; }
 .grid td.has-note::after {  /* red corner marker, as Excel shows notes */
   content: ""; position: absolute; top: 0; right: 0;

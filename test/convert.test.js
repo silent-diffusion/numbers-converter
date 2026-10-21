@@ -31,8 +31,12 @@ const fixture = (name) => path.join(__dirname, 'fixtures', `${name}.numbers`);
   const elsewhere = await convertFile(input, outDir);
   assert.strictEqual(path.dirname(elsewhere.outputPath), outDir);
 
+  // Charts become Excel charts and show in the preview; Excel has no bubble charts, so that one is reported.
   const charts = await previewFile(fixture('issue-9'));
-  assert.strictEqual(charts.unsupported.charts, 11);
+  assert.strictEqual(charts.unsupported.charts, 1);
+  assert.strictEqual(charts.sheets.reduce((n, s) => n + s.charts.length, 0), 10);
+  const withCharts = await convertFile(fixture('issue-9'), outDir);
+  assert.strictEqual(withCharts.charts, 10);
 
   const locked = await previewFile(fixture('encrypted'));
   assert.ok(!locked.ok && locked.needsPassword && /password/.test(locked.error));
