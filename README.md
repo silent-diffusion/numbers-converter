@@ -16,11 +16,12 @@ Convert Apple Numbers (`.numbers`) spreadsheets to Excel (`.xlsx`) on Windows, e
 - Drag `.numbers` files onto the window, or click **Choose files**. Each file opens in a preview showing its sheets, cells and formatting.
 - Click **Convert & save** to save it as an `.xlsx` next to the original (change the folder in **Settings → General**). Existing files are never overwritten: you get `Budget (1).xlsx` instead.
 - To skip the button, turn on **Settings → General → Convert automatically**. Files are then saved as soon as they're opened.
+- **Sheets with more than one table** (Settings → General): **Separate sheets** (the default) puts each table on an Excel sheet of its own; **One sheet** keeps a Numbers sheet's tables and charts together on one Excel sheet, laid out as in Numbers. The preview has the same switch for the sheet you're looking at, so each sheet can go either way.
 - You can also right-click a `.numbers` file → **Open with → Numbers Converter**.
 
 ### What carries over
 
-Each Numbers table becomes an Excel sheet (with the table's name in a title row above it when Numbers shows it), keeping:
+Each Numbers table becomes an Excel sheet (with the table's name in a title row above it when Numbers shows it). Or, with **One sheet**, each Numbers sheet becomes one Excel sheet with every table where it sits in Numbers: tables side by side share rows, tables one above the other share columns (as wide as the widest of them needs, so nothing gets cut off), and the gaps between them become rows and columns of the same size. Formulas that read another table follow it wherever it ends up. Either way, tables keep:
 
 - **Values** — numbers, text, dates, durations, checkboxes
 - **Table styles** — the table theme's lines, header/footer colours and banded rows, the sheet's page colour, and Numbers' own row heights and column widths (in points, so text fits as it does in Numbers). Excel's gridlines are turned off, as Numbers shows none.
@@ -50,7 +51,8 @@ Conversion itself never uses the internet; only the update check does.
 ## Develop
 
 The Numbers reader and Excel writer is a Python helper ([`py/numbers_tool.py`](py/numbers_tool.py), with pivot
-recalculation in [`py/pivots.py`](py/pivots.py) and charts in [`py/charts.py`](py/charts.py), built on
+recalculation in [`py/pivots.py`](py/pivots.py), charts in [`py/charts.py`](py/charts.py) and sheet layout in
+[`py/layout.py`](py/layout.py), built on
 [numbers-parser](https://github.com/masaccio/numbers-parser) and [XlsxWriter](https://xlsxwriter.readthedocs.io/)).
 The installer ships it as a standalone PyInstaller build, so users don't need Python.
 
@@ -66,9 +68,10 @@ npm run dist     # build the helper and dist/NumbersConverter-Setup-<version>.ex
 ### Measuring against Apple's own export
 
 [`tools/compare_with_apple.py`](tools/compare_with_apple.py) converts every `X.numbers` in a folder that also has
-Apple's `X.xlsx` export (File → Export To → Excel in Numbers), opens both in Excel, and scores how closely each
-cell matches: text, formulas, fonts, fills, borders, alignment, number formats, row heights and column widths; and
-each chart: its type, and the values and labels Excel reads for each series.
+Apple's `X.xlsx` export (File → Export To → Excel in Numbers; name exports with Numbers' other worksheet option
+`X 2.xlsx`), laid out the way that export was (a worksheet per table, or one per Numbers sheet), opens both in
+Excel, and scores how closely each cell matches: text, formulas, fonts, fills, borders, alignment, number formats,
+row heights and column widths; and each chart: its type, and the values and labels Excel reads for each series.
 Needs Windows with Excel. Pivot tables are skipped (Apple writes Excel pivot tables, laid out Excel's way).
 
 ```bash

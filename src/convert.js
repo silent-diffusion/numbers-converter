@@ -66,14 +66,17 @@ function uniquePath(dir, base, ext) {
   return candidate;
 }
 
-function previewFile(inputPath, password) {
-  return request({ cmd: 'preview', path: inputPath, password });
+// `layout` says how Numbers sheets with several tables are laid out:
+// { default: 'tables' | 'sheet', sheets: { [Numbers sheet name]: 'tables' | 'sheet' } }
+// ('tables': a worksheet per table; 'sheet': one worksheet per Numbers sheet, laid out as in Numbers).
+function previewFile(inputPath, password, layout) {
+  return request({ cmd: 'preview', path: inputPath, password, layout });
 }
 
-function convertFile(inputPath, outputDir, password) {
+function convertFile(inputPath, outputDir, password, layout) {
   const dir = outputDir || path.dirname(inputPath);
   const base = path.basename(inputPath.replace(/[\\/]+$/, ''), '.numbers');
-  return request({ cmd: 'convert', path: inputPath, out: uniquePath(dir, base, '.xlsx'), password });
+  return request({ cmd: 'convert', path: inputPath, out: uniquePath(dir, base, '.xlsx'), password, layout });
 }
 
 module.exports = { convertFile, previewFile, stopHelper };

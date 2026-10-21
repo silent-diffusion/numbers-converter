@@ -26,6 +26,7 @@ import charts
 import extras
 import pivots
 import strokes
+from layout import SHEET, TABLES, Footprint, Layout
 from numbers_parser.cell import (
     RGB,
     BoolCell,
@@ -212,58 +213,34 @@ def release_file():
 
 
 class Book:
+    """A Numbers document as read: its sheets and tables, table titles, charts and pivot tables.
+    Where everything goes in the workbook depends on the layout chosen (see layout())."""
+
     def __init__(self, doc):
         self.doc = doc
-        self.tables = []  # (excel_name, sheet_name, table)
-        self.used_names = set()
-        sheet_tables, sheet_names = {}, {}  # by Numbers sheet id
+        self.sheets = []  # [(sheet id, sheet name, [tables])] in Numbers' order
+        self.tables = []  # [(sheet name, table)]
         for sheet in doc.sheets:
             tables = list(sheet.tables)
             background = sheet_background(doc._model, sheet)
-            sheet_names[sheet._sheet_id] = sheet.name
             for table in tables:
                 if background:
                     SHEET_BACKGROUNDS[(id(table._model), table._table_id)] = background
-                label = sheet.name if len(tables) == 1 else f"{sheet.name} - {table.name}"
-                excel_name = unique_sheet_name(label, self.used_names)
-                self.tables.append((excel_name, sheet.name, table))
-                sheet_tables.setdefault(sheet._sheet_id, []).append((excel_name, table))
+                self.tables.append((sheet.name, table))
+            self.sheets.append((sheet._sheet_id, sheet.name, tables))
         if not self.tables:
             raise UserError("No tables found in this file.")
-        # Table name lookup for cross-table formula references.
-        self.by_table, self.by_sheet = {}, {}
-        for excel_name, sheet_name, table in self.tables:
-            self.by_table[(sheet_name, table.name)] = excel_name
-            self.by_table.setdefault((None, table.name), excel_name)
-            self.by_sheet.setdefault(sheet_name, excel_name)
-        self.table_of = {excel_name: table for excel_name, _, table in self.tables}
-        self.excel_of = {table._table_id: excel_name for excel_name, _, table in self.tables}
-        self.titles = {excel_name: table_title(table) for excel_name, _, table in self.tables}
+        self.table_by_id = {table._table_id: table for _, table in self.tables}
+        self.sheet_name_of = {table._table_id: sheet_name for sheet_name, table in self.tables}
+        self.titles = {table._table_id: table_title(table) for _, table in self.tables}
         self.unsupported = count_drawables(doc)
-        # Charts, and where they go: beside or above their table (in rows added above it), or on a
-        # sheet of their own when their Numbers sheet has no table.
-        self.charts, self.bands, self.chart_sheets = [], {}, {}
         try:
             self.charts, self.unsupported["charts"] = charts.read_charts(self, CHART_TOOLS)
-            tools = SimpleNamespace(**vars(CHART_TOOLS),
-                                    size=lambda table: table_size(table, self.titles[self.excel_of[table._table_id]]))
-            charts.layout(self, sheet_tables, sheet_names, lambda name: unique_sheet_name(name, self.used_names), tools)
         except Exception:  # never let a chart stop the tables converting
-            self.charts, self.bands, self.chart_sheets = [], {}, {}
-            self.unsupported["charts"] = count_drawables(doc)["charts"]
-        # Each table's place on its sheet: how many rows sit above it (rows making room for charts,
-        # then the title row Numbers shows when a table's name is visible).
-        self.top = {excel_name: len(self.bands.get(excel_name, [])) + (1 if title else 0)
-                    for excel_name, title in self.titles.items()}
-        # Worksheets in Numbers' order: each sheet's tables, or its charts when it has no table.
-        self.sheet_order = []
-        for sheet in doc.sheets:
-            self.sheet_order += [excel_name for excel_name, _ in sheet_tables.get(sheet._sheet_id, [])]
-            if sheet._sheet_id in self.chart_sheets:
-                self.sheet_order.append(self.chart_sheets[sheet._sheet_id])
+            self.charts = []
         # Pivot tables whose summary values have to be recalculated: {table_id: {(row, col): (value, source cell)}}
         self.pivot_values = {}
-        for _, _, table in self.tables:
+        for _, table in self.tables:
             try:
                 pivot = pivots.pivot_for(table)
             except Exception:  # pivots.Unsupported, or a pivot laid out in a way we don't recognise
@@ -273,6 +250,14 @@ class Book:
                 self.pivot_values[table._table_id] = pivot.values
                 if pivot.missing:
                     self.unsupported["pivots"] += 1
+        self.layouts = {}
+
+    def layout(self, options=None):
+        """Where everything goes for a set of layout choices (see layout.Layout), worked out once."""
+        key = json.dumps(options or {}, sort_keys=True)
+        if key not in self.layouts:
+            self.layouts[key] = Layout(self, options, lambda table: footprint(self, table), unique_sheet_name)
+        return self.layouts[key]
 
 
 # What charts.py needs from here: a cell's text as Numbers shows it and its Excel number format, and
@@ -282,13 +267,21 @@ CHART_TOOLS = SimpleNamespace(text=lambda cell: "" if isinstance(cell, (EmptyCel
                               number_format=lambda cell: excel_number_format(cell))
 
 
-def table_size(table, title):
-    """(width, height) in points of a table as written to Excel: its visible columns and rows, and
-    its title row if it has one."""
-    hidden_cols, hidden_rows = extras.hidden(table, columns=True), extras.hidden(table, columns=False)
-    width = sum(w for c, w in enumerate(header_sizes(table, columns=True)) if c not in hidden_cols)
-    height = sum(h for r, h in enumerate(header_sizes(table, columns=False)) if r not in hidden_rows)
-    return width, height + (title_height(title) if title else 0)
+def footprint(book, table):
+    """A table as the layout sees it: its position on its Numbers sheet, and its rows (its title row
+    first, if Numbers shows its name) and columns as they're written out."""
+    title = book.titles[table._table_id]
+    hidden_rows, hidden_cols = extras.hidden(table, columns=False), extras.hidden(table, columns=True)
+    rows = [(height, r in hidden_rows) for r, height in enumerate(header_sizes(table, columns=False))]
+    cols = [(max(6.0, width), c in hidden_cols) for c, width in enumerate(header_sizes(table, columns=True))]
+    if title:
+        rows.insert(0, (title_height(title), False))
+    try:
+        g = pivots.find_table_info(table._model, table._table_id).super.geometry
+        position = (g.position.x, g.position.y)
+    except Exception:
+        position = (0.0, 0.0)
+    return Footprint(table, position, rows, cols, title)
 
 
 def table_title(table):
@@ -626,40 +619,62 @@ def is_numeric(cell):
 # ---------------------------------------------------------------- preview
 
 
-def preview(path, password=None):
-    """Cells are sent as plain text, [text, style index], or [text, style index, extras] where
-    extras may hold "runs" ([[text, style index], ...]), "link", "note" and "control". Each sheet
-    also lists the charts on it (see charts.describe) and the rows above its table ("bands": rows
-    making room for charts, then "title")."""
+def preview(path, password=None, layout_options=None):
+    """Each worksheet the file becomes, laid out as it will be saved (see layout.Layout): its cells
+    in a grid, with every table placed where it goes and its title in a merged cell above it.
+    Cells are sent as plain text, [text, style index], or [text, style index, extras] where extras
+    may hold "runs" ([[text, style index], ...]), "link", "note" and "control"; None marks a cell
+    covered by a merged one. Each sheet also says which Numbers sheet it shows ("numbersSheet"),
+    how many tables that has ("tableCount") and how it's laid out ("layout"), and lists its charts
+    (see charts.describe)."""
     book = load(path, password)
-    sheets = []
-    for excel_name in book.sheet_order:
-        sheet_charts = [charts.describe(chart) for chart in book.charts if chart.host == excel_name]
-        table = book.table_of.get(excel_name)
-        if table is None:  # a Numbers sheet with charts but no tables
-            sheets.append({"name": excel_name, "rows": [], "charts": sheet_charts, "bands": [], "colWidths": [],
-                           "rowHeights": [], "totalRows": 0, "totalCols": 0})
-            continue
-        rows_shown = min(table.num_rows, PREVIEW_MAX_ROWS)
-        cols_shown = min(table.num_cols, PREVIEW_MAX_COLS)
-        styles, style_ids = [{}], {"{}": 0}  # index 0 = unstyled; such cells are sent as plain strings
+    layout = book.layout(layout_options)
+    return {"sheets": [preview_sheet(book, ws) for ws in layout.sheets], "unsupported": book.unsupported}
 
-        def style_index(st):
-            key = json.dumps(st, sort_keys=True)
-            if key not in style_ids:
-                style_ids[key] = len(styles)
-                styles.append(st)
-            return style_ids[key]
 
+def preview_sheet(book, ws):
+    total_rows, total_cols = ws.size()
+    rows_shown, cols_shown = min(total_rows, PREVIEW_MAX_ROWS), min(total_cols, PREVIEW_MAX_COLS)
+    grid = [[""] * cols_shown for _ in range(rows_shown)]
+    styles, style_ids = [{}], {"{}": 0}  # index 0 = unstyled; such cells are sent as plain strings
+    merges = []
+
+    def style_index(st):
+        key = json.dumps(st, sort_keys=True)
+        if key not in style_ids:
+            style_ids[key] = len(styles)
+            styles.append(st)
+        return style_ids[key]
+
+    def merge(r1, c1, r2, c2):
+        if r1 < rows_shown and c1 < cols_shown:
+            r2, c2 = min(r2, rows_shown - 1), min(c2, cols_shown - 1)
+            merges.append([r1, c1, r2, c2])
+            for r in range(r1, r2 + 1):
+                for c in range(c1, c2 + 1):
+                    if (r, c) != (r1, c1):
+                        grid[r][c] = None
+
+    for placed in ws.tables:
+        table = placed.table
+        title = book.titles[table._table_id]
+        if title and placed.title_row < rows_shown and placed.col < cols_shown:
+            background = SHEET_BACKGROUNDS.get((id(table._model), table._table_id))
+            st = {"font": title["font"], "size": title["size"], "b": 1 if title["bold"] else 0,
+                  "i": 1 if title["italic"] else 0, "color": title["color"], "bg": background, "ha": "center", "va": "middle"}
+            grid[placed.title_row][placed.col] = [title["text"], style_index({k: v for k, v in st.items() if v})]
+            merge(placed.title_row, placed.col, placed.title_row, placed.col + table.num_cols - 1)
         computed = book.pivot_values.get(table._table_id, {})
-        source_rows = table_rows(table)
-        rows = []
-        for r in range(rows_shown):
-            row = []
-            for c in range(cols_shown):
-                cell = source_rows[r][c]
+        for r, source_row in enumerate(table_rows(table)):
+            row = placed.row + r
+            if row >= rows_shown:
+                break
+            for c, cell in enumerate(source_row):
+                col = placed.col + c
+                if col >= cols_shown:
+                    break
                 if isinstance(cell, MergedCell):
-                    row.append(None)
+                    grid[row][col] = None
                     continue
                 st = cell_style(cell)
                 if (is_numeric(cell) or (r, c) in computed) and "ha" not in st:
@@ -673,37 +688,27 @@ def preview(path, password=None):
                 info = cell_extras(cell)
                 if "runs" in info:
                     info["runs"] = [[piece, style_index(run_style)] for piece, run_style in info["runs"]]
-                if info:
-                    row.append([text, index, info])
-                else:
-                    row.append([text, index] if index else text)
-            rows.append(row)
-
-        merges = []
+                grid[row][col] = [text, index, info] if info else ([text, index] if index else text)
         for rng in table.merge_ranges:
             r1, c1, r2, c2 = parse_range(rng)
-            if r1 < rows_shown and c1 < cols_shown:
-                merges.append([r1, c1, min(r2, rows_shown - 1), min(c2, cols_shown - 1)])
+            merge(placed.row + r1, placed.col + c1, placed.row + r2, placed.col + c2)
 
-        sheets.append({
-            "name": excel_name,
-            "title": book.titles.get(excel_name),
-            "bands": book.bands.get(excel_name, []),
-            "charts": sheet_charts,
-            "background": SHEET_BACKGROUNDS.get((id(table._model), table._table_id)),
-            "rows": rows,
-            "styles": styles,
-            "merges": merges,
-            "colWidths": header_sizes(table, columns=True)[:cols_shown],
-            "rowHeights": header_sizes(table, columns=False)[:rows_shown],
-            "headerRows": table.num_header_rows,
-            "headerCols": table.num_header_cols,
-            "hiddenRows": sorted(i for i in extras.hidden(table, columns=False) if i < rows_shown),
-            "hiddenCols": sorted(i for i in extras.hidden(table, columns=True) if i < cols_shown),
-            "totalRows": table.num_rows,
-            "totalCols": table.num_cols,
-        })
-    return {"sheets": sheets, "unsupported": book.unsupported}
+    return {
+        "name": ws.name,
+        "numbersSheet": ws.numbers_sheet,
+        "tableCount": ws.table_count,
+        "layout": ws.mode,
+        "charts": [charts.describe(chart, position) for chart, position in ws.charts],
+        "rows": grid,
+        "styles": styles,
+        "merges": merges,
+        "colWidths": [ws.cols.get(c, 48.0) for c in range(cols_shown)],
+        "rowHeights": [ws.rows.get(r, 15.0) for r in range(rows_shown)],
+        "hiddenRows": sorted(r for r in ws.hidden_rows if r < rows_shown),
+        "hiddenCols": sorted(c for c in ws.hidden_cols if c < cols_shown),
+        "totalRows": total_rows,
+        "totalCols": total_cols,
+    }
 
 
 def cell_extras(cell):
@@ -992,16 +997,17 @@ TOKEN = re.compile(
 OPERATOR_MAP = {"÷": "/", "×": "*", "≠": "<>", "≤": "<=", "≥": ">="}
 
 
-def referenced_cells(book):
-    """{excel sheet name: [(r1, c1, r2, c2)]} of every range a formula in the file reads, in sheet
-    coordinates (0-based, including any title row above the table)."""
+def referenced_cells(layout):
+    """{worksheet name: [(r1, c1, r2, c2)]} of every range a formula in the file reads, in sheet
+    coordinates (0-based)."""
     refs = {}
-    for excel_name, sheet_name, table in book.tables:
+    for sheet_name, table in layout.book.tables:
+        excel_name = layout.place[table._table_id].sheet
         for row in table.iter_rows():
             for cell in row:
                 if not cell.is_formula:
                     continue
-                excel = excel_formula(book, sheet_name, cell)
+                excel = excel_formula(layout, sheet_name, cell)
                 for target, rng in re.findall(r"(?:'((?:[^']|'')+)'!)?(\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?)", excel or ""):
                     name = target.replace("''", "'") if target else excel_name
                     refs.setdefault(name, []).append(parse_range(rng.replace("$", "")))
@@ -1012,25 +1018,33 @@ def is_referenced(refs, r, c):
     return any(r1 <= r <= r2 and c1 <= c <= c2 for r1, c1, r2, c2 in refs)
 
 
-def excel_formula(book, sheet_name, cell):
-    """The cell's formula in Excel form (None if it has to stay a value), translated once per cell."""
-    cache = book.__dict__.setdefault("_formulas", {})
+def excel_formula(layout, sheet_name, cell):
+    """The cell's formula in Excel form (None if it has to stay a value), translated once per cell
+    for each layout."""
     key = (cell._table_id, cell.row, cell.col)
-    if key not in cache:
+    if key not in layout.formulas:
         try:
             # Numbers returns durations from date maths where Excel returns plain numbers (e.g.
             # NETWORKDAYS), which the duration format would then show as hours, so those keep values.
-            cache[key] = None if isinstance(cell, DurationCell) else translate_formula(cell.formula, book, sheet_name, cell)
+            layout.formulas[key] = (None if isinstance(cell, DurationCell)
+                                    else translate_formula(cell.formula, layout, sheet_name, cell))
         except Exception:
-            cache[key] = None
-    return cache[key]
+            layout.formulas[key] = None
+    return layout.formulas[key]
 
 
-def shift_rows(cells, offset):
-    """Move every row number in a reference like B2 or $A$3:C9 down by offset rows."""
-    if not offset:
+def shift_rows(cells, offset, columns=0):
+    """Move every cell in a reference like B2 or $A$3:C9 down by `offset` rows and right by `columns`."""
+    if not offset and not columns:
         return cells
-    return re.sub(r"(\$?[A-Z]{1,3}\$?)(\d+)", lambda m: f"{m.group(1)}{int(m.group(2)) + offset}", cells)
+
+    def move(m):
+        dollar, letters, row_dollar, row = m.groups()
+        col = 0
+        for ch in letters:
+            col = col * 26 + ord(ch) - 64
+        return f"{dollar}{column_letters(col - 1 + columns)}{row_dollar}{int(row) + offset}"
+    return re.sub(r"(\$?)([A-Z]{1,3})(\$?)(\d+)", move, cells)
 
 
 def column_letters(index):
@@ -1058,45 +1072,52 @@ def merge_exact_ranges(formula):
     return re.sub(r"(⟦[^⟧]*⟧):(⟦[^⟧]*⟧)", merge, formula)
 
 
-def exact_reference(code, book, own_excel, cell, as_range):
+def exact_reference(code, layout, own_table, cell, as_range):
     """Excel reference for an exact reference code, or None. Whole columns (header names like
     Amount, or column letters) mean the column's body cells, without header and footer rows, when
     they're a whole function argument (SUM(Amount)); anywhere else Numbers uses the cell in the
     formula's own row (Price×Quantity), which only makes sense within the formula's own table.
-    Whole rows work the same way across the body columns."""
+    Whole rows work the same way across the body columns. Cells are placed where their table sits
+    on its worksheet, which is named when it isn't the formula's own."""
     table_id, r1, r2, c1, c2, flags = EXACT.fullmatch(code).groups()
-    excel = book.excel_of.get(int(table_id))
-    if excel is None:
+    table_id = int(table_id)
+    placed = layout.place.get(table_id)
+    if placed is None:
         return None
-    table = book.table_of[excel]
-    if table._model.objects[table._table_id].HasField("pivot_owner"):
+    table = placed.table
+    tm = table._model.objects[table_id]
+    if tm.HasField("pivot_owner"):
         return None  # pivot cells are laid out in display order, not the order references use
-    tm = table._model.objects[table._table_id]
-    top = book.top.get(excel, 0)
+    own = layout.place.get(own_table)
+    top, left = placed.row, placed.col
     flags = int(flags)
-    prefix = "" if excel == own_excel else "'" + excel.replace("'", "''") + "'!"
+    prefix = "" if own is not None and own.sheet == placed.sheet else "'" + placed.sheet.replace("'", "''") + "'!"
     row_abs, col_abs, row2_abs, col2_abs = ("$" if flags >> i & 1 else "" for i in range(4))
     r1, r2, c1, c2 = (int(v) if v != "" else None for v in (r1, r2, c1, c2))
     r2 = r1 if r2 is None else r2
     c2 = c1 if c2 is None else c2
+
+    def letters(c):
+        return column_letters(c + left)
+
     if r1 is not None and c1 is not None:
-        start = f"{col_abs}{column_letters(c1)}{row_abs}{r1 + top + 1}"
-        end = f"{col2_abs}{column_letters(c2)}{row2_abs}{r2 + top + 1}"
+        start = f"{col_abs}{letters(c1)}{row_abs}{r1 + top + 1}"
+        end = f"{col2_abs}{letters(c2)}{row2_abs}{r2 + top + 1}"
         return prefix + (start if (r1, c1) == (r2, c2) else f"{start}:{end}")
     if c1 is not None:  # whole column(s)
         first, last = tm.number_of_header_rows, table.num_rows - tm.number_of_footer_rows - 1
         if as_range and last >= first:
-            return (f"{prefix}{col_abs}{column_letters(c1)}{first + top + 1}:"
-                    f"{col2_abs or col_abs}{column_letters(c2)}{last + top + 1}")
-        if not as_range and c1 == c2 and excel == own_excel and cell is not None and first <= cell.row <= last:
-            return f"{col_abs}{column_letters(c1)}{cell.row + top + 1}"
+            return (f"{prefix}{col_abs}{letters(c1)}{first + top + 1}:"
+                    f"{col2_abs or col_abs}{letters(c2)}{last + top + 1}")
+        if not as_range and c1 == c2 and table_id == own_table and cell is not None and first <= cell.row <= last:
+            return f"{col_abs}{letters(c1)}{cell.row + top + 1}"
         return None
     if r1 is not None:  # whole row(s)
         first, last = tm.number_of_header_columns, table.num_cols - 1
         if as_range and last >= first:
-            return f"{prefix}{column_letters(first)}{row_abs}{r1 + top + 1}:{column_letters(last)}{row2_abs or row_abs}{r2 + top + 1}"
-        if not as_range and r1 == r2 and excel == own_excel and cell is not None and first <= cell.col <= last:
-            return f"{column_letters(cell.col)}{row_abs}{r1 + top + 1}"
+            return f"{prefix}{letters(first)}{row_abs}{r1 + top + 1}:{letters(last)}{row2_abs or row_abs}{r2 + top + 1}"
+        if not as_range and r1 == r2 and table_id == own_table and cell is not None and first <= cell.col <= last:
+            return f"{letters(cell.col)}{row_abs}{r1 + top + 1}"
     return None
 
 
@@ -1136,10 +1157,9 @@ def lookup_is_safe(name, args, book):
 def searched_values(code, book, first_column=False, first_row=False):
     """Cell values an exact reference covers (whole columns/rows meaning their body cells)."""
     table_id, r1, r2, c1, c2, _ = EXACT.fullmatch(code).groups()
-    excel = book.excel_of.get(int(table_id))
-    if excel is None:
+    table = book.table_by_id.get(int(table_id))
+    if table is None:
         return None
-    table = book.table_of[excel]
     tm = table._model.objects[table._table_id]
     rows = table_rows(table)
     if r1 == "":  # whole column(s): the body rows
@@ -1182,17 +1202,21 @@ def cached_value_of(value):
     return delta.days + delta.seconds / 86400
 
 
-def translate_formula(formula, book, sheet_name, cell=None):
+def translate_formula(formula, layout, sheet_name, cell=None):
     """Numbers formula text -> Excel formula, or None if it can't be represented safely. `cell` is
-    the formula's own cell, which places references relative to its table's position on the sheet."""
+    the formula's own cell; references are placed where their tables sit (layout.place)."""
     if not formula or not formula.strip():
         return None  # e.g. pivot table summaries, which numbers-parser can't decode
-    excel_of = getattr(book, "excel_of", {})
-    own_excel = excel_of.get(cell._table_id) if cell is not None else None
-    tops = getattr(book, "top", {})
+    place = getattr(layout, "place", {})
+    own_table = cell._table_id if cell is not None else None
+
+    def offsets(table_id):
+        placed = place.get(table_id)
+        return (placed.row, placed.col) if placed else (0, 0)
+
     out = []
     # One frame per open parenthesis: [function name or None, commas seen, any argument text seen,
-    # the tokens of each argument].
+    # the tokens of each argument, where the function's name is in `out`].
     stack = []
     tokens = [(m.lastgroup, m.group()) for m in TOKEN.finditer(merge_exact_ranges(formula))]
     significant = [i for i, (kind, _) in enumerate(tokens) if kind != "ws"]
@@ -1202,7 +1226,7 @@ def translate_formula(formula, book, sheet_name, cell=None):
         if stack and text not in (",", ")"):
             stack[-1][3][-1].append((kind, text))
         if kind == "op" and text == "(":
-            stack.append([None, 0, False, [[]]])
+            stack.append([None, 0, False, [[]], None])
         elif kind == "op" and text == ",":
             if not stack:
                 return None
@@ -1211,7 +1235,7 @@ def translate_formula(formula, book, sheet_name, cell=None):
         elif kind == "op" and text == ")":
             if not stack:
                 return None
-            name, commas, seen, args = stack.pop()
+            name, commas, seen, args, at = stack.pop()
             if not name and commas:
                 return None  # Numbers' (A1,B2) list syntax; Excel reads it as a union and gives #VALUE!
             if name:
@@ -1219,12 +1243,17 @@ def translate_formula(formula, book, sheet_name, cell=None):
                 low, high = EXCEL_FUNCTIONS[name]
                 if count < low or (high is not None and count > high):
                     return None
-                if name in LOOKUP_ARGUMENTS and not lookup_is_safe(name, args, book):
+                if name in LOOKUP_ARGUMENTS and not lookup_is_safe(name, args, layout.book):
                     return None
-                if name == "ROW" and tops.get(own_excel, 0):
-                    # Numbers counts rows within the table; the title row above it moves Excel's count.
-                    out.append(")-" + str(tops[own_excel]) + ")")
-                    continue
+                if name in ("ROW", "COLUMN"):
+                    # Numbers counts rows (columns) within a table, Excel across the sheet, where
+                    # the table may start further down (right): its title row, other tables.
+                    target = next((int(EXACT.fullmatch(t).group(1)) for k, t in args[0] if k == "exact"), own_table)
+                    shift = offsets(target)[0 if name == "ROW" else 1]
+                    if shift:
+                        out[at] = "(" + out[at]
+                        out.append(f")-{shift})")
+                        continue
         if kind == "str":
             if re.search(r"\d{1,4}[/.-]\d{1,2}[/.-]\d{1,4}", text):
                 return None  # dates written as text are read using the computer's region settings
@@ -1232,24 +1261,24 @@ def translate_formula(formula, book, sheet_name, cell=None):
         elif kind == "xref":
             *names, cells = [p.strip("'") for p in text.split("::")]
             if len(names) == 2:
-                target = book.by_table.get((names[0], names[1]))
+                target = layout.by_table.get((names[0], names[1]))
             else:
                 target = (
-                    book.by_table.get((sheet_name, names[0]))
-                    or book.by_table.get((None, names[0]))
-                    or book.by_sheet.get(names[0])
+                    layout.by_table.get((sheet_name, names[0]))
+                    or layout.by_table.get((None, names[0]))
+                    or layout.by_sheet.get(names[0])
                 )
-            if target is None:
+            if target is None or target not in place:
                 return None
-            out.append("'" + target.replace("'", "''") + "'!" + shift_rows(cells, tops.get(target, 0)))
+            out.append("'" + place[target].sheet.replace("'", "''") + "'!" + shift_rows(cells, *offsets(target)))
         elif kind == "ref":
-            out.append(shift_rows(text, tops.get(own_excel, 0)))
+            out.append(shift_rows(text, *offsets(own_table)))
         elif kind == "func":
             name = text.rstrip("( \t")
             if name not in EXCEL_FUNCTIONS:
                 return None
-            stack.append([name, 0, False, [[]]])
-            out.append(("(" if name == "ROW" and tops.get(own_excel, 0) else "") + name + "(")
+            stack.append([name, 0, False, [[]], len(out)])
+            out.append(name + "(")
         elif kind in ("bool", "num", "op", "ws"):
             out.append(text)
         elif text in OPERATOR_MAP:
@@ -1260,7 +1289,7 @@ def translate_formula(formula, book, sheet_name, cell=None):
             after = tokens[significant[position + 1]][1] if position + 1 < len(significant) else None
             opens_argument = before[0] == "func" or before[1] in ("(", ",")  # "SUM(" arrives as one token
             as_range = bool(stack and stack[-1][0]) and opens_argument and after in (",", ")")
-            excel = exact_reference(text, book, own_excel, cell, as_range) if excel_of else None
+            excel = exact_reference(text, layout, own_table, cell, as_range) if place else None
             if excel is None:
                 return None
             out.append(excel)
@@ -1332,29 +1361,29 @@ def naive(value):
 
 
 class OffsetSheet:
-    """A worksheet seen from a table placed `top` rows down it (below its title): calls that take
-    a row are shifted, so the table can be written in its own coordinates."""
+    """A worksheet seen from a table placed `top` rows down and `left` columns across it: calls that
+    take a cell or a range are shifted, so the table can be written in its own coordinates."""
 
-    ROW_ARGS = {name: (0,) for name in (
+    CELL_ARGS = {name: ((0,), (1,)) for name in (
         "write_blank", "write_string", "write_number", "write_boolean", "write_datetime", "write_formula",
-        "write_url", "write_rich_string", "write_comment", "insert_checkbox", "set_row", "set_row_pixels",
-        "freeze_panes")}
-    ROW_ARGS.update({name: (0, 2) for name in ("merge_range", "data_validation", "autofilter")})
+        "write_url", "write_rich_string", "write_comment", "insert_checkbox")}
+    CELL_ARGS.update({name: ((0, 2), (1, 3)) for name in ("merge_range", "data_validation")})
 
-    def __init__(self, ws, top):
-        self.ws, self.top = ws, top
+    def __init__(self, ws, top, left=0):
+        self.ws, self.top, self.left = ws, top, left
 
     def __getattr__(self, name):
         method = getattr(self.ws, name)
-        positions = self.ROW_ARGS.get(name)
-        if not positions or not self.top:
+        positions = self.CELL_ARGS.get(name)
+        if not positions or not (self.top or self.left):
             return method
 
         def shifted(*args, **kwargs):
             args = list(args)
-            for p in positions:
-                if p < len(args) and isinstance(args[p], int):
-                    args[p] += self.top
+            for indexes, offset in zip(positions, (self.top, self.left)):
+                for p in indexes:
+                    if p < len(args) and isinstance(args[p], int):
+                        args[p] += offset
             return method(*args, **kwargs)
         return shifted
 
@@ -1365,78 +1394,66 @@ def title_height(title):
     return round(title["size"] * (2.5 if title["font"] == "Segoe UI" else 2.3) * 2) / 2
 
 
-def write_title(ws, row, title, table, formats, background):
+def write_title(ws, row, col, title, table, formats, background):
     """The table's name in a row above it, merged across the table, as Numbers shows it."""
     style = {"font": title["font"], "size": title["size"], "ha": "center", "va": "middle",
              "b": 1 if title["bold"] else 0, "i": 1 if title["italic"] else 0,
              "color": title["color"], "bg": background}
     fmt = formats.get({k: v for k, v in style.items() if v}, None)
-    ws.set_row(row, title_height(title))
     if table.num_cols > 1:
-        ws.merge_range(row, 0, row, table.num_cols - 1, title["text"], fmt)
+        ws.merge_range(row, col, row, col + table.num_cols - 1, title["text"], fmt)
     else:
-        ws.write_string(row, 0, title["text"], fmt)
+        ws.write_string(row, col, title["text"], fmt)
 
 
-def convert(path, out, password=None):
+def convert(path, out, password=None, layout_options=None):
     book = load(path, password)
+    layout = book.layout(layout_options)
     workbook = xlsxwriter.Workbook(out, {"use_future_functions": True, "strings_to_numbers": False,
                                          "strings_to_formulas": False, "strings_to_urls": False})
     formats = FormatCache(workbook)
     lists = ListSheet(workbook)
     stats = {"formulas": 0, "formulasAsValues": 0}
-    refs = referenced_cells(book)
+    refs = referenced_cells(layout)
     worksheets = {}
 
-    for excel_name in book.sheet_order:
-        sheet = worksheets[excel_name] = workbook.add_worksheet(excel_name)
+    for plan in layout.sheets:
+        sheet = worksheets[plan.name] = workbook.add_worksheet(plan.name)
         sheet.hide_gridlines(2)  # Numbers shows no grid outside a table's own lines, which are drawn as borders
-        if excel_name in book.table_of:
-            write_table(sheet, excel_name, book, formats, lists, stats, refs)
+        # Sizes stay in points, like the fonts, so text fits its cells as it does in Numbers.
+        for c, width in sorted(plan.cols.items()):
+            sheet.set_column_pixels(c, c, max(8, round(width * 4 / 3)), None, {"hidden": c in plan.hidden_cols})
+        for r, height in sorted(plan.rows.items()):
+            sheet.set_row(r, height, None, {"hidden": r in plan.hidden_rows})
+        if plan.freeze:
+            sheet.freeze_panes(*plan.freeze)
+        if plan.autofilter:
+            sheet.autofilter(*plan.autofilter)
+        for placed in plan.tables:
+            write_table(sheet, placed, layout, formats, lists, stats, refs.get(plan.name, []))
 
     def cell_info(cell):  # a table cell's value and number format, for chart data copied to another sheet
         table_id, r, c = cell
-        source = book.table_of[book.excel_of[table_id]]._data[r][c]
+        source = book.table_by_id[table_id]._data[r][c]
         value = cached_value(source) if not isinstance(source, (EmptyCell, MergedCell, ErrorCell)) else None
         return value, formats.get({}, excel_number_format(source))
 
-    stats["charts"] = charts.write_charts(workbook, book, worksheets, cell_info,
-                                          lambda name: unique_sheet_name(name, set(book.used_names)))
+    stats["charts"] = charts.write_charts(workbook, layout, worksheets, cell_info,
+                                          lambda name: unique_sheet_name(name, set(layout.used_names)))
     workbook.close()
-    return {"outputPath": out, "sheets": len(book.sheet_order), "unsupported": book.unsupported, **stats}
+    return {"outputPath": out, "sheets": len(layout.sheets), "unsupported": book.unsupported, **stats}
 
 
-def write_table(sheet, excel_name, book, formats, lists, stats, refs):
-    table = book.table_of[excel_name]
-    sheet_name = next(name for excel, name, _ in book.tables if excel == excel_name)
-    bands = book.bands.get(excel_name, [])
-    for r, height in enumerate(bands):  # room for the charts above the table
-        sheet.set_row(r, height)
-    top = book.top.get(excel_name, 0)
-    if top > len(bands):
-        write_title(sheet, len(bands), book.titles[excel_name], table, formats,
+def write_table(sheet, placed, layout, formats, lists, stats, sheet_refs):
+    table = placed.table
+    book = layout.book
+    sheet_name = book.sheet_name_of[table._table_id]
+    title = book.titles[table._table_id]
+    if title:
+        write_title(sheet, placed.title_row, placed.col, title, table, formats,
                     SHEET_BACKGROUNDS.get((id(table._model), table._table_id)))
-    ws = OffsetSheet(sheet, top)
-    sheet_refs = refs.get(excel_name, [])
-    # Sizes stay in points, like the fonts, so text fits its cells as it does in Numbers.
-    hidden_cols = extras.hidden(table, columns=True)
-    for c, width in enumerate(header_sizes(table, columns=True)):
-        ws.set_column_pixels(c, c, max(8, round(width * 4 / 3)), None, {"hidden": c in hidden_cols})
-    hidden_rows = extras.hidden(table, columns=False)
-    for r, height in enumerate(header_sizes(table, columns=False)):
-        ws.set_row(r, height, None, {"hidden": r in hidden_rows})
-    # Header rows and columns stay in view where Numbers freezes them (not with charts above the
-    # table: those rows would be frozen too).
-    tm = table._model.objects[table._table_id]
-    frozen_rows = table.num_header_rows if tm.header_rows_frozen and not bands else 0
-    frozen_cols = table.num_header_cols if tm.header_columns_frozen else 0
-    if frozen_rows:
-        ws.freeze_panes(frozen_rows, frozen_cols)
-    elif frozen_cols:
-        sheet.freeze_panes(0, frozen_cols)
-    if extras.filter_enabled(table) and table.num_rows > 1:
-        header = max(table.num_header_rows - 1, 0)
-        ws.autofilter(header, 0, table.num_rows - 1, table.num_cols - 1)
+    ws = OffsetSheet(sheet, placed.row, placed.col)
+    top, left = placed.row, placed.col
 
     merged_anchors = {}
     for rng in table.merge_ranges:
@@ -1462,8 +1479,9 @@ def write_table(sheet, excel_name, book, formats, lists, stats, refs):
             if (r, c) in merged_anchors:
                 r2, c2 = merged_anchors[(r, c)]
                 ws.merge_range(r, c, r2, c2, None, fmt)
-            if not write_special(ws, r, c, cell, style, fmt, formats, lambda r=r, c=c: is_referenced(sheet_refs, r + top, c)):
-                write_cell(ws, r, c, cell, fmt, book, sheet_name, stats)
+            if not write_special(ws, r, c, cell, style, fmt, formats,
+                                 lambda r=r, c=c: is_referenced(sheet_refs, r + top, c + left)):
+                write_cell(ws, r, c, cell, fmt, layout, sheet_name, stats)
             add_cell_extras(ws, r, c, cell, lists)
 
 
@@ -1562,9 +1580,9 @@ def cached_value(cell):
     return "" if value is None else str(value)
 
 
-def write_cell(ws, r, c, cell, fmt, book, sheet_name, stats):
+def write_cell(ws, r, c, cell, fmt, layout, sheet_name, stats):
     if cell.is_formula:
-        excel = excel_formula(book, sheet_name, cell)
+        excel = excel_formula(layout, sheet_name, cell)
         try:
             formula = cell.formula
         except Exception:
@@ -1604,9 +1622,9 @@ def write_cell(ws, r, c, cell, fmt, book, sheet_name, stats):
 def handle(request):
     cmd = request.get("cmd")
     if cmd == "preview":
-        return preview(request["path"], request.get("password"))
+        return preview(request["path"], request.get("password"), request.get("layout"))
     if cmd == "convert":
-        return convert(request["path"], request["out"], request.get("password"))
+        return convert(request["path"], request["out"], request.get("password"), request.get("layout"))
     if cmd == "ping":
         return {}
     raise UserError(f"Unknown command: {cmd}")

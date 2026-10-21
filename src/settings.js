@@ -5,7 +5,8 @@ const { app } = require('electron');
 const DEFAULTS = {
   autoUpdate: true,
   autoConvert: false, // save an .xlsx as soon as a file is opened, instead of waiting for "Convert & save"
-  outputDir: null // null = save next to the original file
+  outputDir: null, // null = save next to the original file
+  sheetLayout: 'tables' // Numbers sheets with several tables: 'tables' = a worksheet per table, 'sheet' = one, as in Numbers
 };
 
 const file = () => path.join(app.getPath('userData'), 'settings.json');

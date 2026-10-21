@@ -12,7 +12,7 @@ How Numbers stores a chart (a ChartDrawableArchive with a ChartArchive extension
     (tschchartinfodefaulttitle, tschchartseriescolumnfill, ...), resolved through a series' own
     style, its theme style and their parents.
 
-read_charts turns each chart into a Chart description, layout decides which worksheet each chart
+read_charts turns each chart into a Chart description, layout.py decides which worksheet each chart
 goes on and where, and write_charts builds the Excel charts. Charts read the converted table cells,
 so they stay live in Excel, as in Apple's own export. Data Excel can't reference in place (cells on
 several sheets, or values with no table behind them) goes on a hidden "Chart Data" sheet, as
@@ -29,7 +29,7 @@ from numbers_parser.numbers_uuid import NumbersUUID
 from xlsxwriter.utility import quote_sheetname, xl_range_abs, xl_rowcol_to_cell
 
 import extras
-import pivots
+from layout import overlap
 
 NODE = TSCE.ASTNodeArrayArchive.ASTNodeType
 CHART = TSCH.ChartArchive.unity
@@ -78,7 +78,6 @@ PARTS = {
 }
 MIXED_KINDS = {0: "column", 1: "area", 2: "line"}  # tschchartseriesdefaultseriestype
 LABEL_POSITIONS = {4: "inside_end", 3: "center", 2: "inside_base", 1: "outside_end"}  # column and bar charts
-EXCEL_MAX_ROW_HEIGHT = 409  # points
 PT_TO_PX = 4 / 3
 
 
@@ -210,10 +209,9 @@ def expand(book, block):
     """The cells a block covers, as [(table_id, row, col)]. A header cell on its own stands for its
     column's (or row's) body cells, as in Numbers, and so does a whole column (or row)."""
     table_id, r1, c1, r2, c2 = block
-    excel = book.excel_of.get(table_id)
-    if excel is None:
+    table = book.table_by_id.get(table_id)
+    if table is None:
         raise Unsupported("chart reads a table we didn't convert")
-    table = book.table_of[excel]
     tm = table._model.objects[table_id]
     if tm.HasField("pivot_owner"):
         raise Unsupported("chart reads a pivot table")  # its rows are rewritten; keep the chart's own copy
@@ -273,18 +271,16 @@ class Chart:
         self.category_axis = {}
         self.skip_hidden = True
         self.tables = []             # ids of tables the chart reads
-        # Where it goes, worked out by layout(): worksheet, frame on the canvas, and (x, y, w, h) in pixels.
-        self.host = None
-        self.frame = None
-        self.plot = None
-        self.position = None
+        self.frame = None            # (x, y, w, h) on the canvas of everything it draws: body, title, labels, legend
+        self.plot = None             # where its plot goes: its body, or a little less for some pies
+        self.size = None             # (width, height) in pixels
 
 
 def read_charts(book, tools):
     """[Chart] for every chart in the document, plus how many couldn't be read. `tools` gives a
     cell's text as Numbers shows it (text) and its Excel number format (number_format), and the
     Windows font for a Mac font (font, bold)."""
-    model = book.tables[0][2]._model
+    model = book.tables[0][1]._model
     found, skipped = [], 0
     for oid, obj in list(model.objects._objects.items()):
         if type(obj).__name__ != "ChartDrawableArchive":
@@ -342,6 +338,9 @@ def read_chart(book, model, oid, drawable, tools):
         chart.category_axis["series_labels"] = bool(prop(model, ids, "tschchartaxiscategoryshowserieslabels", False))
 
     read_series(book, model, c, chart, tools)
+    chart.frame = frame(chart)
+    chart.plot = plot_area(chart)
+    chart.size = (max(40, round(chart.frame[2] * PT_TO_PX)), max(40, round(chart.frame[3] * PT_TO_PX)))
     return chart
 
 
@@ -515,7 +514,7 @@ def matches(book, cells, values, skip_hidden):
     hidden, visible = {}, 0
     for table_id, r, c in cells:
         if table_id not in hidden:
-            table = book.table_of[book.excel_of[table_id]]
+            table = book.table_by_id[table_id]
             hidden[table_id] = (extras.hidden(table, columns=False), extras.hidden(table, columns=True))
         rows, cols = hidden[table_id]
         visible += r not in rows and c not in cols
@@ -525,7 +524,7 @@ def matches(book, cells, values, skip_hidden):
 def cell_text(book, cell, tools):
     table_id, r, c = cell
     try:
-        return tools.text(book.table_of[book.excel_of[table_id]]._data[r][c])
+        return tools.text(book.table_by_id[table_id]._data[r][c])
     except (IndexError, KeyError):
         return None
 
@@ -540,7 +539,7 @@ def value_format(book, chart, tools):
             if not digits:
                 continue
             table_id, r, c = cell
-            code = tools.number_format(book.table_of[book.excel_of[table_id]]._data[r][c]) or ""
+            code = tools.number_format(book.table_by_id[table_id]._data[r][c]) or ""
             head = code.split(";")[0]
             places = re.search(r"\.([0#?]+)", head)
             suffix = text[digits[-1] + 1:].strip(" )")
@@ -557,7 +556,7 @@ def find_labels(book, chart, tools):
         return cell_text(book, cell, tools)
 
     def model_of(table_id):
-        return book.table_of[book.excel_of[table_id]]._model.objects[table_id]
+        return book.table_by_id[table_id]._model.objects[table_id]
 
     for s in chart.series:
         if not s.cells or s.name in (None, ""):
@@ -653,85 +652,6 @@ def plot_area(chart):
             side = max(bh / 2, ly - 4 - by)
             return bx + (bw - side) / 2, by, side, side
     return chart.body
-
-
-def table_rect(table, size):
-    """(x, y, w, h) of a table on its sheet canvas, in points, or None. Its position comes from
-    Numbers; its size is measured from the rows and columns written out (`size(table)`), since the
-    size Numbers keeps alongside the position can be out of date."""
-    try:
-        g = pivots.find_table_info(table._model, table._table_id).super.geometry
-        return (g.position.x, g.position.y, *size(table))
-    except Exception:
-        return None
-
-
-def distance(a, b):
-    ax, ay, aw, ah = a
-    bx, by, bw, bh = b
-    return math.hypot(max(bx - (ax + aw), ax - (bx + bw), 0), max(by - (ay + ah), ay - (by + bh), 0))
-
-
-def layout(book, sheet_tables, sheet_names, unique_name, tools):
-    """Decide where each chart goes. A chart sits with the table it reads when that's on the same
-    Numbers sheet, else with the nearest table there, keeping its position relative to the table;
-    charts above a table get rows that make room for them (book.bands: their heights). Charts on a
-    sheet with no tables get a worksheet of their own (book.chart_sheets). `tools.size(table)` gives
-    a table's width and height as written, title row included."""
-    book.bands, book.chart_sheets = {}, {}
-    rects = {}
-    hosted = {}
-    for chart in book.charts:
-        chart.frame = frame(chart)
-        chart.plot = plot_area(chart)
-        for excel, table in sheet_tables.get(chart.sheet_id, []):
-            if excel not in rects:
-                rects[excel] = table_rect(table, tools.size)
-        placed = [(excel, rects[excel]) for excel, _ in sheet_tables.get(chart.sheet_id, []) if rects[excel]]
-        own = [excel for excel, _ in placed if book.table_of[excel]._table_id in chart.tables]
-        if own:
-            chart.host = own[0]
-        elif placed:
-            chart.host = min(placed, key=lambda p: distance(chart.frame, p[1]))[0]
-        else:
-            if chart.sheet_id not in book.chart_sheets:
-                book.chart_sheets[chart.sheet_id] = unique_name(sheet_names.get(chart.sheet_id) or "Charts")
-            chart.host = book.chart_sheets[chart.sheet_id]
-        hosted.setdefault(chart.host, []).append(chart)
-
-    for host, charts in hosted.items():
-        top = min(chart.frame[1] for chart in charts)
-        left = min(chart.frame[0] for chart in charts)
-        if host in book.table_of:
-            table_x, table_y, table_w, table_h = rects[host]
-            # Where Excel's top-left corner falls on the Numbers sheet. The table's title row starts
-            # at the table's own position, as in Apple's export, below rows making room for charts
-            # above it. The table always starts in column A, so with charts to its left it moves
-            # left of where it was, and the charts keep their places.
-            origin_x = max(0.0, left - 6) if left < table_x else table_x
-            origin_y = max(0.0, top - 6) if top < table_y else table_y
-            band = table_y - origin_y
-            if band >= 1:
-                rows = math.ceil(band / EXCEL_MAX_ROW_HEIGHT)
-                book.bands[host] = [round(band / rows, 2)] * rows
-        else:
-            origin_x, origin_y = max(0.0, left - 6), max(0.0, top - 6)
-        for chart in charts:
-            fx, fy, fw, fh = chart.frame
-            x, y = max(0.0, fx - origin_x), max(0.0, fy - origin_y)
-            # A chart that would cover the table's cells (it sat on top of the table, or left of it
-            # before the table moved to column A) goes just right of the table instead.
-            if host in book.table_of and overlap((x, y, fw, fh), (0, table_y - origin_y, table_w, table_h)) > 10:
-                x = table_w + 12
-            chart.position = (round(x * PT_TO_PX), round(y * PT_TO_PX), max(40, round(fw * PT_TO_PX)),
-                              max(40, round(fh * PT_TO_PX)))
-
-
-def overlap(a, b):
-    """How far two rectangles overlap: the smaller of the overlap's width and height (0 if apart)."""
-    w = min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0])
-    h = min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1])
-    return max(0.0, min(w, h))
 
 
 # ---------------------------------------------------------------- writing
@@ -984,42 +904,42 @@ def write_chart(workbook, chart, data, place, cell_info):
             target.set_y2_axis(y2)
     if not chart.skip_hidden:
         excel.show_hidden_data()
-    excel.set_size({"width": chart.position[2], "height": chart.position[3]})
+    excel.set_size({"width": chart.size[0], "height": chart.size[1]})
     return excel
 
 
-def write_charts(workbook, book, worksheets, cell_info, unique_name):
-    """Adds every chart to its worksheet; returns how many were written. cell_info(cell) gives a
-    table cell's (value, format) for copies on the Chart Data sheet."""
+def write_charts(workbook, layout, worksheets, cell_info, unique_name):
+    """Adds every chart to the worksheet the layout puts it on; returns how many were written.
+    cell_info(cell) gives a table cell's (value, format) for copies on the Chart Data sheet."""
     data = ChartData(workbook, unique_name("Chart Data"))
 
     def place(cell):
         table_id, r, c = cell
-        excel = book.excel_of[table_id]
-        return excel, r + book.top.get(excel, 0), c
+        placed = layout.place[table_id]
+        return placed.sheet, r + placed.row, c + placed.col
 
     written = 0
-    for chart in book.charts:
-        try:
-            excel = write_chart(workbook, chart, data, place, cell_info)
-        except Exception:
-            excel = None
-        if excel is None:
-            book.unsupported["charts"] += 1
-            continue
-        x, y, _, _ = chart.position
-        worksheets[chart.host].insert_chart(0, 0, excel, {"x_offset": x, "y_offset": y})
-        written += 1
+    for plan in layout.sheets:
+        for chart, (x, y) in plan.charts:
+            try:
+                excel = write_chart(workbook, chart, data, place, cell_info)
+            except Exception:
+                excel = None
+            if excel is None:
+                layout.book.unsupported["charts"] += 1
+                continue
+            worksheets[plan.name].insert_chart(0, 0, excel, {"x_offset": x, "y_offset": y})
+            written += 1
     return written
 
 
 # ---------------------------------------------------------------- preview
 
 
-def describe(chart):
-    """What the app's preview needs to draw a chart as it will look in Excel: its place and size in
-    pixels from the sheet's top-left cell, where the plot and legend sit in it (fractions), and its
-    data and colours."""
+def describe(chart, position):
+    """What the app's preview needs to draw a chart as it will look in Excel: its place (`position`)
+    and size in pixels from the sheet's top-left cell, where the plot and legend sit in it
+    (fractions), and its data and colours."""
     fx, fy, fw, fh = chart.frame
 
     def relative(rect):
@@ -1056,7 +976,7 @@ def describe(chart):
     axis = chart.value_axes[0] if chart.value_axes else {}
     return {
         "kind": chart.kind, "stacked": chart.subtype == "stacked",
-        "x": chart.position[0], "y": chart.position[1], "w": chart.position[2], "h": chart.position[3],
+        "x": position[0], "y": position[1], "w": chart.size[0], "h": chart.size[1],
         "title": chart.title, "titleStyle": chart.title_style,
         "plot": relative(chart.plot), "legend": relative(chart.legend) if chart.legend else None,
         "legendStyle": chart.legend_style,

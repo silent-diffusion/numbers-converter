@@ -3,11 +3,13 @@ Measures how close our conversions are to Apple's own Excel exports.
 
     .venv/Scripts/python tools/compare_with_apple.py reference/raw [--ours reference/ours] [--rows 120]
 
-For every X.numbers in the folder that has an Apple export X.xlsx next to it, the file is converted
-with py/numbers_tool.py and both workbooks are opened in Excel (so values, text, fonts, fills,
-borders, alignment and number formats are read exactly as Excel shows them). Each Numbers table is
-located in both workbooks and compared cell by cell. Prints a score per attribute, per file, and
-example differences. Needs Windows with Excel installed (pywin32).
+For every X.numbers in the folder that has an Apple export next to it (X.xlsx, and X 2.xlsx etc. for
+Numbers' other export options), the file is converted with py/numbers_tool.py, laid out the way the
+export was (an Excel sheet per table, or one per Numbers sheet), and both workbooks are opened in
+Excel (so values, text, fonts, fills, borders, alignment and number formats are read exactly as Excel
+shows them). Each Numbers table is located in both workbooks and compared cell by cell, and so is
+each chart. Prints a score per attribute, per file, and example differences. Needs Windows with
+Excel installed (pywin32).
 """
 
 import argparse
@@ -76,20 +78,34 @@ def cell_props(ws, r, c):
     return props
 
 
-def text_rows(ws, top, rows, cols):
-    return [[(ws.Cells(top + r, 1 + c).Text or "").strip() for c in range(cols)] for r in range(rows)]
-
-
-def locate(ws, expected, max_offset=6):
-    """Row offset where the table starts on the sheet: the offset whose cell texts best match ours."""
+def locate(ws, expected):
+    """(row, column) offset where a table starts on a sheet: where the text in its first rows best
+    matches ours (matching on words, since numbers are stored raw but shown formatted)."""
+    used = ws.UsedRange
+    values = used.Value
+    if not isinstance(values, tuple):
+        values = ((values,),)
+    texts = [[v.strip() if isinstance(v, str) else None for v in row] for row in values]
+    words = [(r, c, text) for r, row in enumerate(expected) for c, text in enumerate(row)
+             if text and any(ch.isalpha() for ch in text)]
     best, best_score = None, 0
-    rows, cols = len(expected), len(expected[0]) if expected else 0
-    for offset in range(max_offset):
-        found = text_rows(ws, 1 + offset, rows, cols)
-        score = sum(1 for a, b in zip(sum(expected, []), sum(found, [])) if a and a == b)
-        if score > best_score:
-            best, best_score = offset, score
+    for r0 in range(len(texts)):
+        for c0 in range(len(texts[0])):
+            score = sum(1 for r, c, text in words
+                        if r0 + r < len(texts) and c0 + c < len(texts[0]) and texts[r0 + r][c0 + c] == text)
+            if score > best_score:
+                best, best_score = (used.Row - 1 + r0, used.Column - 1 + c0), score
     return best
+
+
+def layout_of(book, apple):
+    """How an Apple export laid out Numbers sheets holding several tables: a sheet per table
+    ("Sheet - Table") or one per Numbers sheet."""
+    names = {ws.Name for ws in apple.Worksheets}
+    for _, sheet_name, tables in book.sheets:
+        if len(tables) > 1:
+            return "tables" if any(f"{sheet_name} - {t.name}"[:31] in names for t in tables) else "sheet"
+    return "tables"
 
 
 def same(key, a, b):
@@ -142,43 +158,47 @@ def find_sheet(wb, candidates):
 
 def compare_file(excel, numbers_path, apple_path, ours_path, max_rows, totals, examples):
     book = nt.load(numbers_path)
-    nt.convert(numbers_path, ours_path)
     apple = excel.Workbooks.Open(os.path.abspath(apple_path), UpdateLinks=0, ReadOnly=True)
+    options = {"default": layout_of(book, apple)}
+    layout = book.layout(options)
+    nt.convert(numbers_path, ours_path, layout_options=options)
     ours = excel.Workbooks.Open(os.path.abspath(ours_path), UpdateLinks=0, ReadOnly=True)
     file_scores = collections.Counter()
     file_totals = collections.Counter()
-    name = os.path.basename(numbers_path)
+    name = f"{os.path.basename(apple_path)} ({options['default']})"
+    widened = set()
     try:
-        for excel_name, sheet_name, table in book.tables:
+        for sheet_name, table in book.tables:
             if table._model.objects[table._table_id].HasField("pivot_owner"):
                 continue  # Apple writes a real Excel pivot table, laid out Excel's way; ours mirrors Numbers
-            candidates = [f"{sheet_name} - {table.name}", sheet_name, excel_name]
-            a_ws, o_ws = find_sheet(apple, candidates), find_sheet(ours, [excel_name])
+            placed = layout.place[table._table_id]
+            candidates = [f"{sheet_name} - {table.name}", sheet_name, placed.sheet]
+            a_ws, o_ws = find_sheet(apple, candidates), find_sheet(ours, [placed.sheet])
             if a_ws is None or o_ws is None:
                 print(f"  {name}: no matching sheet for {candidates[0]!r}")
                 continue
             rows = min(table.num_rows, max_rows)
             cols = table.num_cols
             expected = [[(nt.formatted(cell) or "").strip() for cell in row[:cols]] for row in nt.table_rows(table)[:min(rows, 6)]]
-            for ws in (a_ws, o_ws):
-                ws.Columns.ColumnWidth  # touch
             a_off = locate(a_ws, expected)
             if a_off is None:
-                a_off = 1  # empty table: Apple puts the title in row 1
-            o_off = book.top.get(excel_name, 0)  # we know where we put it
+                a_off = (1, 0)  # empty table: Apple puts the title in row 1
+            o_off = (placed.row, placed.col)  # we know where we put it
             # Read sizes before widening columns for text comparison.
             for c in range(cols):
-                a_w, o_w = a_ws.Columns(c + 1).Width, o_ws.Columns(c + 1).Width
+                a_w, o_w = a_ws.Columns(1 + a_off[1] + c).Width, o_ws.Columns(1 + o_off[1] + c).Width
                 record(totals, file_scores, file_totals, examples, "column width", abs(a_w - o_w) <= max(2, 0.06 * a_w),
                        f"{name} [{a_ws.Name}] col {c + 1}: apple {a_w:.0f}pt ours {o_w:.0f}pt")
             for r in range(rows):
-                a_h, o_h = a_ws.Rows(1 + a_off + r).RowHeight, o_ws.Rows(1 + o_off + r).RowHeight
+                a_h, o_h = a_ws.Rows(1 + a_off[0] + r).RowHeight, o_ws.Rows(1 + o_off[0] + r).RowHeight
                 record(totals, file_scores, file_totals, examples, "row height", abs(a_h - o_h) <= max(2, 0.08 * a_h),
                        f"{name} [{a_ws.Name}] row {r + 1}: apple {a_h:.1f}pt ours {o_h:.1f}pt")
-            a_ws.Columns.ColumnWidth = 80
-            o_ws.Columns.ColumnWidth = 80
-            a_grid = [[cell_props(a_ws, 1 + a_off + r, 1 + c) for c in range(cols)] for r in range(rows)]
-            o_grid = [[cell_props(o_ws, 1 + o_off + r, 1 + c) for c in range(cols)] for r in range(rows)]
+            for ws in (a_ws, o_ws):
+                if (ws.Parent.Name, ws.Name) not in widened:  # so cell texts aren't cut to "###"
+                    ws.Columns.ColumnWidth = 80
+                    widened.add((ws.Parent.Name, ws.Name))
+            a_grid = [[cell_props(a_ws, 1 + a_off[0] + r, 1 + a_off[1] + c) for c in range(cols)] for r in range(rows)]
+            o_grid = [[cell_props(o_ws, 1 + o_off[0] + r, 1 + o_off[1] + c) for c in range(cols)] for r in range(rows)]
             effective_edges(a_grid)
             effective_edges(o_grid)
             for r in range(rows):
@@ -270,12 +290,12 @@ def main():
             base = os.path.splitext(numbers_path)[0]
             if args.only and args.only not in base:
                 continue
-            apple_path = base + ".xlsx"
-            if not os.path.exists(apple_path):
-                continue
-            # Excel can't open two workbooks with the same file name at once.
-            ours_path = os.path.join(ours_dir, os.path.basename(base) + " (ours).xlsx")
-            compare_file(excel, numbers_path, apple_path, ours_path, args.rows, totals, examples)
+            exports = [base + ".xlsx"] + sorted(glob.glob(glob.escape(base) + " [0-9].xlsx"))
+            for apple_path in filter(os.path.exists, exports):
+                # Excel can't open two workbooks with the same file name at once.
+                stem = os.path.splitext(os.path.basename(apple_path))[0]
+                ours_path = os.path.join(ours_dir, stem + " (ours).xlsx")
+                compare_file(excel, numbers_path, apple_path, ours_path, args.rows, totals, examples)
     finally:
         excel.Quit()
 

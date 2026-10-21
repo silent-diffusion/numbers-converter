@@ -10,7 +10,8 @@ const ICONS = {
 
 let settings = {};
 // Opened files: { id, path, name, status: loading|locked|ready|converting|done|error, preview, sheet,
-//                 output, error, password (kept in memory only), hint }
+//                 output, error, password (kept in memory only), hint,
+//                 layouts: { [Numbers sheet name]: 'tables' | 'sheet' } chosen in the preview }
 let files = [];
 let selectedId = null;
 let nextId = 1;
@@ -55,7 +56,7 @@ async function openFiles(paths) {
   const added = fresh.map((p) => {
     const existing = files.find((f) => f.path === p);
     if (existing) return existing;
-    const f = { id: nextId++, path: p, name: baseName(p), status: 'loading', sheet: 0 };
+    const f = { id: nextId++, path: p, name: baseName(p), status: 'loading', sheet: 0, layouts: {} };
     files.push(f);
     return f;
   });
@@ -67,8 +68,11 @@ async function openFiles(paths) {
   }
 }
 
+// How the file's Numbers sheets with several tables are laid out: the setting, unless switched in the preview.
+const layoutOptions = (f) => ({ default: settings.sheetLayout || 'tables', sheets: f.layouts });
+
 async function load(f) {
-  const res = await window.api.preview(f.path, f.password);
+  const res = await window.api.preview(f.path, f.password, layoutOptions(f));
   if (res.ok) {
     f.preview = res;
     f.status = 'ready';
@@ -95,7 +99,7 @@ async function convert(f) {
   if (f.status !== 'ready') return;
   f.status = 'converting';
   render();
-  const res = await window.api.convert(f.path, f.password);
+  const res = await window.api.convert(f.path, f.password, layoutOptions(f));
   if (res.ok) {
     f.status = 'done';
     f.output = res.outputPath;
@@ -103,6 +107,29 @@ async function convert(f) {
   } else {
     f.status = 'error';
     f.error = res.error;
+  }
+  render();
+}
+
+// Lays a Numbers sheet's tables out the other way, and shows the result.
+async function switchLayout(f, numbersSheet, mode) {
+  f.layouts = { ...f.layouts, [numbersSheet]: mode };
+  const res = await window.api.preview(f.path, f.password, layoutOptions(f));
+  if (!res.ok) return;
+  f.preview = res;
+  f.sheet = Math.max(0, res.sheets.findIndex((s) => s.numbersSheet === numbersSheet));
+  if (f.status === 'done') f.status = 'ready'; // the saved copy has the old layout; offer to save again
+  render();
+}
+
+// When the setting changes, files not saved yet are shown with it.
+async function relayout() {
+  for (const f of files.filter((x) => x.status === 'ready')) {
+    const current = f.preview.sheets[f.sheet]?.numbersSheet;
+    const res = await window.api.preview(f.path, f.password, layoutOptions(f));
+    if (!res.ok) continue;
+    f.preview = res;
+    f.sheet = Math.max(0, res.sheets.findIndex((s) => s.numbersSheet === current));
   }
   render();
 }
@@ -196,13 +223,18 @@ function renderPreview(f) {
   }
 
   const sheets = f.preview.sheets;
-  if (sheets.length > 1) {
-    sheets.forEach((s, i) => {
-      tabs.append(button(s.name, `sheet-tab${i === f.sheet ? ' active' : ''}`, () => { f.sheet = i; renderPreview(f); }));
-    });
-  }
-
+  f.sheet = Math.min(f.sheet, sheets.length - 1);
   const sheet = sheets[f.sheet];
+  if (sheets.length > 1) {
+    const list = el('div', 'tab-list'); // scrolls on its own, so the layout switch stays in view
+    sheets.forEach((s, i) => {
+      list.append(button(s.name, `sheet-tab${i === f.sheet ? ' active' : ''}`, () => { f.sheet = i; renderPreview(f); }));
+    });
+    tabs.append(list);
+    list.querySelector('.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+  if (sheet.tableCount > 1) tabs.append(layoutSwitch(f, sheet));
+
   if (!sheet.rows.length && !sheet.charts?.length) {
     grid.replaceChildren(el('div', 'grid-message', 'This sheet is empty.'));
   } else {
@@ -228,6 +260,27 @@ function renderPreview(f) {
   }
   note.hidden = !notes.length;
   note.replaceChildren(...notes.map((n) => el('div', null, n)));
+}
+
+// A Numbers sheet with several tables can become an Excel sheet per table, or one sheet laid out as in Numbers.
+function layoutSwitch(f, sheet) {
+  const box = el('div', 'layout-switch');
+  box.title = `How the ${sheet.tableCount} tables on the Numbers sheet "${sheet.numbersSheet}" are saved: `
+    + 'each on its own Excel sheet, or together on one sheet, laid out as in Numbers.';
+  box.append(el('span', 'layout-label', `${sheet.numbersSheet}:`));
+  const group = el('div', 'segmented small');
+  group.setAttribute('role', 'radiogroup');
+  for (const [mode, label] of [['tables', 'Separate sheets'], ['sheet', 'One sheet']]) {
+    const b = button(label, sheet.layout === mode ? 'active' : '', () => {
+      if (sheet.layout !== mode) switchLayout(f, sheet.numbersSheet, mode);
+    });
+    b.setAttribute('role', 'radio');
+    b.setAttribute('aria-checked', String(sheet.layout === mode));
+    b.disabled = f.status === 'converting';
+    group.append(b);
+  }
+  box.append(group);
+  return box;
 }
 
 // The password is only kept in memory for this file while the app is open; it is never saved.
@@ -360,27 +413,15 @@ function buildTable(sheet) {
   head.append(headRow);
   table.append(head);
 
-  const spans = new Map(sheet.merges.map(([r1, c1, r2, c2]) => [`${r1},${c1}`, [r2 - r1 + 1, c2 - c1 + 1]]));
+  // Merged cells span the rows and columns that are showing.
+  const visible = (from, to, hidden) => Array.from({ length: to - from + 1 }, (_, i) => from + i).filter((i) => !hidden.has(i)).length;
+  const spans = new Map(sheet.merges.map(([r1, c1, r2, c2]) => [`${r1},${c1}`, [visible(r1, r2, hiddenRows), visible(c1, c2, hiddenCols)]]));
   const body = el('tbody');
-  // Rows making room for charts above the table, then the table's name when Numbers shows it, each
-  // in rows of their own above the table (as in the saved file).
-  const bands = sheet.bands || [];
-  bands.forEach((height, i) => {
-    const tr = el('tr', 'band-row');
-    tr.style.height = `${height * PT_TO_PX}px`;
-    tr.append(el('th', null, String(i + 1)));
-    const td = el('td');
-    td.colSpan = Math.max(visibleCols.length, 1);
-    tr.append(td);
-    body.append(tr);
-  });
-  const top = bands.length + (sheet.title ? 1 : 0);
-  if (sheet.title) body.append(titleRow(sheet, visibleCols.length, bands.length + 1));
   sheet.rows.forEach((row, r) => {
     if (hiddenRows.has(r)) return;
     const tr = el('tr');
     tr.style.height = `${sheet.rowHeights[r] * PT_TO_PX}px`;
-    tr.append(el('th', null, String(r + 1 + top)));
+    tr.append(el('th', null, String(r + 1)));
     row.forEach((cell, c) => {
       if (cell === null || hiddenCols.has(c)) return; // covered by a merged cell, or hidden
       const [text, styleIdx, extra = {}] = typeof cell === 'string' ? [cell, 0] : cell;
@@ -403,7 +444,7 @@ function buildTable(sheet) {
       }
       if (extra.control === 'popup') td.classList.add('has-popup');
       const span = spans.get(`${r},${c}`);
-      if (span) { td.rowSpan = span[0]; td.colSpan = span[1]; }
+      if (span) { td.rowSpan = Math.max(1, span[0]); td.colSpan = Math.max(1, span[1]); }
       if (!td.title && text.length > 40) td.title = text;
       tr.append(td);
     });
@@ -411,18 +452,6 @@ function buildTable(sheet) {
   });
   table.append(body);
   return table;
-}
-
-function titleRow(sheet, span, number) {
-  const { text, font, size, bold, italic, color, height } = sheet.title;
-  const tr = el('tr', 'title-row');
-  tr.append(el('th', null, String(number)));
-  const td = el('td', null, text);
-  td.colSpan = span;
-  applyStyle(td, { font, size, b: bold, i: italic, color, bg: sheet.background, ha: 'center', va: 'middle' });
-  tr.style.height = `${(height || size * 2.3) * PT_TO_PX}px`;
-  tr.append(td);
-  return tr;
 }
 
 /* ---------- Drag & drop, buttons ---------- */
@@ -457,6 +486,22 @@ function renderOutput() {
 $('#auto-convert').onchange = async (e) => {
   settings = await window.api.setSettings({ autoConvert: e.target.checked });
 };
+
+function renderSheetLayout() {
+  document.querySelectorAll('#sheet-layout button').forEach((b) => {
+    const on = b.dataset.layout === (settings.sheetLayout || 'tables');
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-checked', String(on));
+  });
+}
+document.querySelectorAll('#sheet-layout button').forEach((b) => {
+  b.onclick = async () => {
+    if (b.dataset.layout === settings.sheetLayout) return;
+    settings = await window.api.setSettings({ sheetLayout: b.dataset.layout });
+    renderSheetLayout();
+    relayout();
+  };
+});
 $('#choose-out').onclick = async () => {
   const dir = await window.api.pickFolder();
   if (dir) { settings = await window.api.setSettings({ outputDir: dir }); renderOutput(); }
@@ -514,6 +559,7 @@ window.api.onUpdateState(renderUpdate);
   $('#version').textContent = version;
   $('#auto-update').checked = settings.autoUpdate;
   $('#auto-convert').checked = settings.autoConvert;
+  renderSheetLayout();
   renderOutput();
   renderUpdate(await window.api.getUpdateState());
   setInterval(async () => renderUpdate(await window.api.getUpdateState()), 60000); // keep "last checked" fresh

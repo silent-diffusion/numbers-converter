@@ -15,7 +15,9 @@ const fixture = (name) => path.join(__dirname, 'fixtures', `${name}.numbers`);
   const preview = await previewFile(input);
   assert.ok(preview.ok, preview.error);
   assert.deepStrictEqual(preview.sheets.map((s) => s.name), ['Styles', 'Headers', 'Borders', 'Large Borders']);
-  const [text, styleIdx] = preview.sheets[0].rows[0][0];
+  // The sheet's grid has the table's title in a merged row above the table.
+  assert.strictEqual(preview.sheets[0].rows[0][0][0], 'Table 1');
+  const [text, styleIdx] = preview.sheets[0].rows[1][0];
   assert.match(text, /^name="Title"/);
   assert.strictEqual(preview.sheets[0].styles[styleIdx].b, 1);
 
@@ -37,6 +39,17 @@ const fixture = (name) => path.join(__dirname, 'fixtures', `${name}.numbers`);
   assert.strictEqual(charts.sheets.reduce((n, s) => n + s.charts.length, 0), 10);
   const withCharts = await convertFile(fixture('issue-9'), outDir);
   assert.strictEqual(withCharts.charts, 10);
+
+  // A Numbers sheet with several tables: a worksheet per table, or one laid out as in Numbers,
+  // chosen for all sheets or sheet by sheet.
+  const separate = await previewFile(fixture('create-formulas'));
+  assert.strictEqual(separate.sheets.length, 14);
+  const together = await previewFile(fixture('create-formulas'), undefined, { default: 'sheet' });
+  assert.deepStrictEqual(together.sheets.map((s) => s.name), ['Main Sheet', 'Powers Sheet']);
+  const mixed = await previewFile(fixture('create-formulas'), undefined, { default: 'tables', sheets: { 'Main Sheet': 'sheet' } });
+  assert.strictEqual(mixed.sheets.length, 6);
+  const saved = await convertFile(fixture('create-formulas'), outDir, undefined, { default: 'sheet' });
+  assert.ok(saved.ok && saved.sheets === 2 && saved.formulas > 30);
 
   const locked = await previewFile(fixture('encrypted'));
   assert.ok(!locked.ok && locked.needsPassword && /password/.test(locked.error));

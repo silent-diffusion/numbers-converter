@@ -171,8 +171,10 @@ li.error .status-icon, li.error .file-meta { color: var(--danger); }
 .preview-title { min-width: 0; }
 .preview-title .file-name { font-weight: 600; font-size: 15px; }
 .preview-head .file-meta.done { color: var(--accent); }
-.sheet-tabs { display: flex; gap: 4px; padding: 8px 10px 0; border-bottom: 1px solid var(--border); overflow-x: auto; overflow-y: hidden; flex-shrink: 0; scrollbar-width: none; }
+.sheet-tabs { display: flex; align-items: flex-end; padding: 8px 10px 0; border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .sheet-tabs:empty { display: none; }
+.tab-list { display: flex; gap: 4px; min-width: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; margin-bottom: -1px; }
+.tab-list .sheet-tab { margin-bottom: 0; }
 .sheet-tab {
   padding: 5px 12px; border: 1px solid transparent; border-bottom: 0;
   border-radius: 6px 6px 0 0; background: none; color: var(--muted);
@@ -180,6 +182,23 @@ li.error .status-icon, li.error .file-meta { color: var(--danger); }
 }
 .sheet-tab:hover { color: var(--text); }
 .sheet-tab.active { color: var(--text); background: var(--surface); border-color: var(--border); font-weight: 600; }
+.layout-switch {
+  margin-left: auto; padding: 0 0 6px 12px; flex-shrink: 0;
+  display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; white-space: nowrap;
+}
+.layout-label { max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+
+/* Two or three choices side by side (Settings, and the preview's layout switch). */
+.segmented { display: inline-flex; flex-shrink: 0; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.segmented button {
+  padding: 6px 12px; border: 0; background: var(--surface); color: var(--muted);
+  font: inherit; cursor: pointer; white-space: nowrap;
+}
+.segmented button + button { border-left: 1px solid var(--border); }
+.segmented button:hover:not(:disabled) { color: var(--text); }
+.segmented button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.segmented button:disabled { cursor: default; opacity: .6; }
+.segmented.small button { padding: 3px 9px; font-size: 12px; }
 
 /* The sheet itself always renders like paper (as in Numbers/Excel) so file colours look right in dark mode. */
 .grid-wrap { flex: 1; min-height: 0; overflow: auto; user-select: text; background: #fff; }
@@ -207,7 +226,6 @@ li.error .status-icon, li.error .file-meta { color: var(--danger); }
 .grid tbody th { position: sticky; left: 0; z-index: 1; text-align: right; }
 .grid thead th.corner { left: 0; z-index: 3; }
 .grid td { position: relative; }
-.grid tr.title-row td, .grid tr.band-row td { border-color: transparent; }
 .sheet-area { position: relative; width: max-content; min-width: 100%; min-height: 100%; }
 .chart-layer { position: absolute; left: 12px; top: 12px; pointer-events: none; }
 .chart-layer .chart { position: absolute; overflow: visible; }
