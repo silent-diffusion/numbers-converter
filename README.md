@@ -24,14 +24,17 @@ Each Numbers table becomes an Excel sheet, keeping:
 
 - **Values** — numbers, text, dates, durations, checkboxes
 - **Formatting** — fonts, sizes, bold/italic/underline/strikethrough, text and fill colours, borders, alignment, text wrapping, merged cells, column widths, row heights, frozen header rows/columns
-- **Number formats** — currency, percentages, decimals, thousands separators, negative styles, date and time formats
+- **Number formats** — currency (including accounting style), percentages, decimals, thousands separators, negative styles, fractions, durations, date and time formats
+- **Cell extras** — comments (as Excel notes), links, bold/italic/coloured words within a cell, bullet and numbered lists, hidden rows and columns, filters (as Excel AutoFilter)
+- **Form controls** — checkboxes (Excel checkboxes), pop-up menus (dropdown lists), sliders, steppers and star ratings (as number-range rules)
 - **Formulas** — rewritten as Excel formulas so they keep calculating. Formulas that use Numbers-only features (header-name references, Apple-only functions, functions that behave differently in Excel) keep their last value instead, and the app tells you how many.
 - **Pivot tables** — newer versions of Numbers don't save pivot totals in the file, so the app recalculates them from the pivot's rules and its source data (grouping by value, date part, etc.; sum, average, count, minimum, maximum). Pivot results are saved as values, not as an Excel pivot table. Any pivot it can't reproduce exactly (e.g. "show as percentage" or running totals) is reported and its totals are left blank rather than guessed.
 
-Not carried over: **charts, images and shapes** (the app tells you when a file has them), conditional highlighting, comments.
+Not carried over yet: **charts, images and shapes** (the app tells you when a file has them), conditional highlighting, and the grouped view of tables with categories (their rows come out in their original order).
 To keep charts, export from Numbers itself (**File → Export To → Excel** on a Mac, iPhone, iPad or iCloud.com).
 
-Files saved by Numbers as a *package* (a folder) must be re-saved as a single file or zipped first. Password-protected files need the password removed in Numbers first.
+Password-protected files ask for the password (and show its hint); it's only kept in memory while the app is open.
+Files a Mac saved as a *package* (a folder ending in `.numbers`) can be dragged onto the window.
 
 ## Updates
 

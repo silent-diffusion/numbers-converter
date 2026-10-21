@@ -66,14 +66,14 @@ function uniquePath(dir, base, ext) {
   return candidate;
 }
 
-function previewFile(inputPath) {
-  return request({ cmd: 'preview', path: inputPath });
+function previewFile(inputPath, password) {
+  return request({ cmd: 'preview', path: inputPath, password });
 }
 
-function convertFile(inputPath, outputDir) {
+function convertFile(inputPath, outputDir, password) {
   const dir = outputDir || path.dirname(inputPath);
-  const base = path.basename(inputPath, path.extname(inputPath));
-  return request({ cmd: 'convert', path: inputPath, out: uniquePath(dir, base, '.xlsx') });
+  const base = path.basename(inputPath.replace(/[\\/]+$/, ''), '.numbers');
+  return request({ cmd: 'convert', path: inputPath, out: uniquePath(dir, base, '.xlsx'), password });
 }
 
 module.exports = { convertFile, previewFile, stopHelper };

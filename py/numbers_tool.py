@@ -15,11 +15,14 @@ import re
 import sys
 import warnings
 from collections import OrderedDict
+from types import SimpleNamespace
 from decimal import ROUND_HALF_UP, Decimal
 
 import xlsxwriter
 from numbers_parser import Document
+from xlsxwriter.utility import xl_range_abs
 
+import extras
 import pivots
 from numbers_parser.cell import (
     RGB,
@@ -31,7 +34,8 @@ from numbers_parser.cell import (
     MergedCell,
     NumberCell,
 )
-from numbers_parser.constants import DATETIME_FIELD_MAP, FormatType
+from numbers_parser.cell import _auto_units
+from numbers_parser.constants import DATETIME_FIELD_MAP, DurationStyle, DurationUnits, FormatType
 from numbers_parser.containers import ObjectStore
 from numbers_parser.numbers_uuid import NumbersUUID
 
@@ -124,7 +128,11 @@ EXCEL_FUNCTIONS = {
 
 
 class UserError(Exception):
-    """An error whose message can be shown to the user as-is."""
+    """An error whose message can be shown to the user as-is. `extra` is sent along with it."""
+
+    def __init__(self, message, **extra):
+        super().__init__(message)
+        self.extra = extra
 
 
 # ---------------------------------------------------------------- loading
@@ -132,26 +140,26 @@ class UserError(Exception):
 _cache = OrderedDict()
 
 
-def load(path):
-    """Parse a Numbers file into a list of table models (cached by path + mtime)."""
-    if os.path.isdir(path):
-        raise UserError(
-            "This file was saved as a Numbers package. Re-save it in Numbers as a single file, or zip it first."
-        )
-    if not path.lower().endswith(".numbers"):
+def load(path, password=None):
+    """Parse a Numbers file (or a Mac folder package) into table models, cached by path + mtime."""
+    if not path.lower().rstrip("\\/").endswith(".numbers"):
         raise UserError("Not a .numbers file.")
-    key = (path, os.path.getmtime(path))
+    key = (path, os.path.getmtime(path), password)
     if key in _cache:
         _cache.move_to_end(key)
         return _cache[key]
 
     try:
-        doc = Document(path)
+        doc = Document(path, password=password or None)
     except Exception as err:  # numbers-parser raises a variety of errors for bad files
-        text = str(err).lower()
-        if "encrypt" in text or "password" in text:
-            raise UserError("This file is password-protected. Remove the password in Numbers and try again.")
-        raise UserError("Could not read this Numbers file (it may be damaged or not a real Numbers file).")
+        text = str(err)
+        if "No password provided" in text:
+            raise UserError("This file is password-protected.", needsPassword=True) from None
+        if "Invalid password" in text:
+            hint = re.search(r"Hint is '(.*)'", text)
+            raise UserError("That password isn't right.", needsPassword=True,
+                            hint=hint.group(1) if hint and hint.group(1) else None) from None
+        raise UserError("Could not read this Numbers file (it may be damaged or not a real Numbers file).") from None
     finally:
         release_file()
 
@@ -261,8 +269,20 @@ def count_drawables(doc):
 
 
 def formatted(cell):
+    bullets = extras.bullet_text(cell)
+    if bullets:
+        return bullets
     try:
-        return cell.formatted_value
+        if (isinstance(cell, NumberCell) and isinstance(cell.value, float) and cell._control_id is None
+                and cell._num_format_id is None and cell._currency_format_id is None):
+            return f"{cell.value:.15g}"  # numbers-parser prints float noise (0.9999000000000001); Numbers doesn't
+        text = cell.formatted_value
+        # numbers-parser can print scientific notation with hundreds of digits; show what Excel will.
+        if len(text) > 40 and re.fullmatch(r"-?\d\.\d+E[+-]\d+", text) and isinstance(cell.value, (int, float)):
+            code = excel_number_format(cell) or "0.00E+00"
+            places = len(re.search(r"\.(0*)", code).group(1)) if "." in code else 0
+            return f"{cell.value:.{places}E}"
+        return text
     except Exception:  # some Numbers date formats can't be rendered by Windows' strftime
         value = cell.value
         if isinstance(value, dt.datetime):
@@ -403,6 +423,17 @@ def border_style(cell):
     return s
 
 
+def table_rows(table):
+    """The table's rows in the order they're written out. numbers-parser lists rows of a table with
+    categories (grouped rows) in grouped display order, but formula references, merges, row sizes
+    and hidden rows all use the original row numbers, so such tables are written in original order.
+    Pivot tables keep display order: their layout is defined by it and nothing refers to their rows."""
+    rows = list(table.iter_rows())
+    if table._model.objects[table._table_id].HasField("pivot_owner"):
+        return rows
+    return sorted(rows, key=lambda row: row[0].row if row else 0)
+
+
 def is_numeric(cell):
     return isinstance(cell, (NumberCell, DateCell, DurationCell))
 
@@ -410,35 +441,49 @@ def is_numeric(cell):
 # ---------------------------------------------------------------- preview
 
 
-def preview(path):
-    book = load(path)
+def preview(path, password=None):
+    """Cells are sent as plain text, [text, style index], or [text, style index, extras] where
+    extras may hold "runs" ([[text, style index], ...]), "link", "note" and "control"."""
+    book = load(path, password)
     sheets = []
     for excel_name, _sheet, table in book.tables:
         rows_shown = min(table.num_rows, PREVIEW_MAX_ROWS)
         cols_shown = min(table.num_cols, PREVIEW_MAX_COLS)
         styles, style_ids = [{}], {"{}": 0}  # index 0 = unstyled; such cells are sent as plain strings
+
+        def style_index(st):
+            key = json.dumps(st, sort_keys=True)
+            if key not in style_ids:
+                style_ids[key] = len(styles)
+                styles.append(st)
+            return style_ids[key]
+
         computed = book.pivot_values.get(table._table_id, {})
+        source_rows = table_rows(table)
         rows = []
         for r in range(rows_shown):
             row = []
             for c in range(cols_shown):
-                cell = table.cell(r, c)
+                cell = source_rows[r][c]
                 if isinstance(cell, MergedCell):
                     row.append(None)
                     continue
                 st = cell_style(cell)
                 if (is_numeric(cell) or (r, c) in computed) and "ha" not in st:
                     st["ha"] = "right"
-                key = json.dumps(st, sort_keys=True)
-                if key not in style_ids:
-                    style_ids[key] = len(styles)
-                    styles.append(st)
+                index = style_index(st)
                 if (r, c) in computed:
                     value, source = computed[(r, c)]
                     text = format_number(value, source and excel_number_format(source))
                 else:
                     text = "" if isinstance(cell, EmptyCell) else formatted(cell)
-                row.append([text, style_ids[key]] if style_ids[key] else text)
+                info = cell_extras(cell)
+                if "runs" in info:
+                    info["runs"] = [[piece, style_index(run_style)] for piece, run_style in info["runs"]]
+                if info:
+                    row.append([text, index, info])
+                else:
+                    row.append([text, index] if index else text)
             rows.append(row)
 
         merges = []
@@ -456,10 +501,34 @@ def preview(path):
             "rowHeights": header_sizes(table, columns=False)[:rows_shown],
             "headerRows": table.num_header_rows,
             "headerCols": table.num_header_cols,
+            "hiddenRows": sorted(i for i in extras.hidden(table, columns=False) if i < rows_shown),
+            "hiddenCols": sorted(i for i in extras.hidden(table, columns=True) if i < cols_shown),
             "totalRows": table.num_rows,
             "totalCols": table.num_cols,
         })
     return {"sheets": sheets, "unsupported": book.unsupported}
+
+
+def cell_extras(cell):
+    """Preview extras for a cell (see preview); run styles are style dicts until indexed."""
+    info = {}
+    runs = extras.rich_runs(cell)
+    if runs:
+        base = {k: v for k, v in cell_style(cell).items() if k in FONT_KEYS}
+        info["runs"] = [(piece, {**base, **style}) for piece, style in runs]
+    links = extras.links(cell)
+    if links:
+        info["link"] = links[0][1]
+    note = extras.comment(cell)
+    if note:
+        info["note"] = note[0] + (f"\n— {note[1]}" if note[1] else "")
+    control = extras.control(cell)
+    if control and control["kind"] == "popup":
+        info["control"] = "popup"
+    return info
+
+
+FONT_KEYS = ("b", "i", "u", "st", "color", "size", "font")
 
 
 def format_number(value, code):
@@ -514,7 +583,10 @@ def excel_number_format(cell):
         if isinstance(cell, DateCell):
             return "m/d/yyyy"
         if isinstance(cell, DurationCell):
-            return "[h]:mm:ss"
+            fmt = DEFAULT_DURATION_FORMAT
+            if cell._duration_format_id is not None:
+                fmt = model.table_format(table_id, cell._duration_format_id)
+            return duration_format(fmt, cell.value.total_seconds())
         if not isinstance(cell, NumberCell):
             return None
         fmt_id = cell._currency_format_id if cell._currency_format_id is not None else cell._num_format_id
@@ -526,34 +598,109 @@ def excel_number_format(cell):
             code = custom.custom_format_string
             # Only pass through simple numeric patterns Excel is sure to accept.
             if code and re.fullmatch(r"[#0?,.%E+\- ()$€£¥]+", code):
+                # "0.#" shows "12570." in Excel for whole numbers, where Numbers shows "12570".
+                if float(cell.value).is_integer() and re.search(r"\.#+(?![0#])", code):
+                    code = re.sub(r"\.#+(?![0#])", "", code)
                 return code
             return None
-        return builtin_number_format(fmt)
+        return builtin_number_format(fmt, cell.value)
     except Exception:
         return None
 
 
-def builtin_number_format(fmt):
+# How Numbers shows a duration that has no format of its own: "1w 3d", "2h 30m", ...
+DEFAULT_DURATION_FORMAT = SimpleNamespace(
+    duration_style=DurationStyle.SHORT, use_automatic_duration_units=True,
+    duration_unit_largest=DurationUnits.WEEK, duration_unit_smallest=DurationUnits.SECOND,
+)
+
+DURATION_UNITS = [  # Numbers unit, seconds, short label, long label
+    (DurationUnits.DAY, 86400, "d", "day"),
+    (DurationUnits.HOUR, 3600, "h", "hour"),
+    (DurationUnits.MINUTE, 60, "m", "minute"),
+    (DurationUnits.SECOND, 1, "s", "second"),
+]
+
+
+def duration_format(fmt, seconds):
+    """Excel format code showing a duration the way Numbers does for this value: the same units,
+    as 2:04:20 (compact), 2d 4h 20m (short) or 2 days 4 hours 20 minutes (long). Weeks, and days
+    beyond 31, are folded into hours since Excel can't show more days than that."""
+    largest, smallest = fmt.duration_unit_largest, fmt.duration_unit_smallest
+    if fmt.use_automatic_duration_units:
+        smallest, largest = _auto_units(seconds, fmt)
+    millis = smallest >= DurationUnits.MILLISECOND
+    if largest <= DurationUnits.DAY and smallest <= DurationUnits.DAY:  # whole days only: a plain day count
+        if fmt.duration_style == DurationStyle.SHORT:
+            return '0"d"'
+        if fmt.duration_style == DurationStyle.LONG:
+            return '0" day"' if round(seconds) == 86400 else '0" days"'
+    if largest <= DurationUnits.DAY:  # Excel has no weeks, and its day count stops at 31
+        largest = DurationUnits.DAY if abs(seconds) < 32 * 86400 else DurationUnits.HOUR
+    smallest = max(min(smallest, DurationUnits.SECOND), largest)
+    units = [u for u in DURATION_UNITS if largest <= u[0] <= smallest]
+    if not units:
+        return "[h]:mm:ss"
+    tokens = {DurationUnits.DAY: "d", DurationUnits.HOUR: "h", DurationUnits.MINUTE: "m", DurationUnits.SECOND: "s"}
+    remaining = abs(seconds)
+    parts = []
+    for i, (unit, size, short, long) in enumerate(units):
+        amount = int(remaining // size)
+        remaining -= amount * size
+        token = tokens[unit]
+        if i == 0 and unit != DurationUnits.DAY:
+            token = f"[{token}]"  # total hours/minutes/seconds, not the remainder
+        elif fmt.duration_style == DurationStyle.COMPACT and i > 0:
+            token = token * 2
+        if unit == DurationUnits.SECOND and millis:
+            token += ".000"
+        if fmt.duration_style == DurationStyle.COMPACT:
+            parts.append(token)
+        elif fmt.duration_style == DurationStyle.SHORT:
+            parts.append(f'{token}"{short}"')
+        else:
+            parts.append(f'{token}" {long}{"" if amount == 1 else "s"}"')
+    return (":" if fmt.duration_style == DurationStyle.COMPACT else " ").join(parts)
+
+
+def auto_places(value):
+    """Decimal places Numbers' "automatic" setting shows for this value (Excel has no equivalent
+    once thousands separators, currency or percent are involved)."""
+    if not isinstance(value, (int, float)) or value == 0:
+        return 0
+    return max(0, -Decimal(f"{abs(value):.15g}").normalize().as_tuple().exponent)
+
+
+# Numbers' fraction accuracy -> Excel fraction format. Positive values are fixed denominators;
+# 0xFFFFFFFF/FE/FD mean "up to 1/2/3 digits".
+FRACTION_FORMATS = {2: "# ?/2", 4: "# ?/4", 8: "# ?/8", 16: "# ??/16", 10: "# ?/10", 100: "# ??/100",
+                    0xFFFFFFFF: "# ?/?", 0xFFFFFFFE: "# ??/??", 0xFFFFFFFD: "# ???/???"}
+
+
+def builtin_number_format(fmt, value=None):
     t = fmt.format_type
     places = fmt.decimal_places
-    auto = places == DECIMAL_PLACES_AUTO
-    decimals = "" if auto or places == 0 else "." + "0" * min(places, 15)
+    if places == DECIMAL_PLACES_AUTO:
+        if t == FormatType.SCIENTIFIC and isinstance(value, (int, float)) and value:
+            places = auto_places(float(f"{abs(value):.15e}".split("e")[0]))  # digits of the mantissa
+        else:
+            places = auto_places(value * 100 if t == FormatType.PERCENT and isinstance(value, (int, float)) else value)
+    decimals = "." + "0" * min(places, 15) if places else ""
     if t == FormatType.PERCENT:
-        return f"0{decimals or ('.##' if auto else '')}%"
+        return f"0{decimals}%"
     if t == FormatType.SCIENTIFIC:
-        return f"0{decimals or '.00'}E+00"
+        return f"0{decimals}E+00"
     if t == FormatType.FRACTION:
-        return "# ?/?"
+        return FRACTION_FORMATS.get(fmt.fraction_accuracy, "# ?/?")
     if t not in (FormatType.DECIMAL, FormatType.CURRENCY):
         return None
-    if t == FormatType.DECIMAL and auto and not fmt.show_thousands_separator:
-        return None
-    body = ("#,##0" if fmt.show_thousands_separator or t == FormatType.CURRENCY else "0") + (
-        "" if auto and t == FormatType.DECIMAL else decimals
-    )
+    if t == FormatType.DECIMAL and fmt.decimal_places == DECIMAL_PLACES_AUTO and not fmt.show_thousands_separator:
+        return None  # General already shows exactly the digits needed
+    body = ("#,##0" if fmt.show_thousands_separator or t == FormatType.CURRENCY else "0") + decimals
     if t == FormatType.CURRENCY:
         symbol = CURRENCY_SYMBOLS.get(fmt.currency_code, fmt.currency_code + " ")
-        body = f'"{symbol}"{body}'
+        # Accounting style lines the symbol up at the left edge of the cell, as Numbers does.
+        body = f'"{symbol}"* {body}' if fmt.use_accounting_style else f'"{symbol}"{body}'
     negative = {0: f"-{body}", 1: f"[Red]{body}", 2: f"({body})", 3: f"[Red]({body})"}.get(fmt.negative_style, f"-{body}")
     return f"{body};{negative}" if fmt.negative_style else body
 
@@ -593,8 +740,10 @@ def icu_to_excel_date(pattern):
             literal += pattern[i + 1:end] if end > i + 1 else "'"
             i = end + 1
         elif ch.isalpha():
-            if ch == "S":  # fractional seconds
+            if ch == "S":  # fractional seconds; Excel only allows them straight after "s."
                 run = len(re.match(r"S+", pattern[i:]).group())
+                if not (out and out[-1] == "." and len(out) > 1 and out[-2] in ("s", "ss")) or literal:
+                    return fallback
                 flush()
                 out.append("0" * min(run, 3))
                 i += run
@@ -640,6 +789,28 @@ TOKEN = re.compile(
 )
 
 OPERATOR_MAP = {"÷": "/", "×": "*", "≠": "<>", "≤": "<=", "≥": ">="}
+
+
+def referenced_cells(book):
+    """{excel sheet name: [(r1, c1, r2, c2)]} of every range a formula in the file reads."""
+    refs = {}
+    for excel_name, sheet_name, table in book.tables:
+        for row in table.iter_rows():
+            for cell in row:
+                if not cell.is_formula:
+                    continue
+                try:
+                    excel = translate_formula(cell.formula, book, sheet_name)
+                except Exception:
+                    continue
+                for target, rng in re.findall(r"(?:'((?:[^']|'')+)'!)?(\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?)", excel or ""):
+                    name = target.replace("''", "'") if target else excel_name
+                    refs.setdefault(name, []).append(parse_range(rng.replace("$", "")))
+    return refs
+
+
+def is_referenced(refs, r, c):
+    return any(r1 <= r <= r2 and c1 <= c <= c2 for r1, c1, r2, c2 in refs)
 
 
 def translate_formula(formula, book, sheet_name):
@@ -766,26 +937,38 @@ def naive(value):
     return value.replace(tzinfo=None) if value.tzinfo else value
 
 
-def convert(path, out):
-    book = load(path)
+def convert(path, out, password=None):
+    book = load(path, password)
     workbook = xlsxwriter.Workbook(out, {"use_future_functions": True, "strings_to_numbers": False,
                                          "strings_to_formulas": False, "strings_to_urls": False})
     formats = FormatCache(workbook)
+    lists = ListSheet(workbook)
     stats = {"formulas": 0, "formulasAsValues": 0}
+    refs = referenced_cells(book)
 
     for excel_name, sheet_name, table in book.tables:
         ws = workbook.add_worksheet(excel_name)
+        sheet_refs = refs.get(excel_name, [])
+        hidden_cols = extras.hidden(table, columns=True)
         for c, width in enumerate(header_sizes(table, columns=True)):
-            ws.set_column_pixels(c, c, max(8, width))
+            ws.set_column_pixels(c, c, max(8, width), None, {"hidden": c in hidden_cols})
         try:
             heights = stored_sizes(table, columns=False)
         except Exception:
             heights = {}
-        for r, height in heights.items():  # rows Numbers sizes automatically are left for Excel to fit
-            if r < table.num_rows:
-                ws.set_row_pixels(r, height)
+        hidden_rows = extras.hidden(table, columns=False)
+        for r in sorted(set(heights) | hidden_rows):  # rows Numbers sizes automatically are left for Excel to fit
+            if r >= table.num_rows:
+                continue
+            if r in heights:
+                ws.set_row_pixels(r, heights[r], None, {"hidden": r in hidden_rows})
+            else:
+                ws.set_row(r, None, None, {"hidden": True})
         if table.num_header_rows or table.num_header_cols:
             ws.freeze_panes(table.num_header_rows, table.num_header_cols)
+        if extras.filter_enabled(table) and table.num_rows > 1:
+            header = max(table.num_header_rows - 1, 0)
+            ws.autofilter(header, 0, table.num_rows - 1, table.num_cols - 1)
 
         merged_anchors = {}
         for rng in table.merge_ranges:
@@ -793,7 +976,7 @@ def convert(path, out):
             merged_anchors[(r1, c1)] = (r2, c2)
 
         computed = book.pivot_values.get(table._table_id, {})
-        for r, row in enumerate(table.iter_rows()):
+        for r, row in enumerate(table_rows(table)):
             for c, cell in enumerate(row):
                 if isinstance(cell, MergedCell):
                     continue
@@ -811,10 +994,91 @@ def convert(path, out):
                 if (r, c) in merged_anchors:
                     r2, c2 = merged_anchors[(r, c)]
                     ws.merge_range(r, c, r2, c2, None, fmt)
-                write_cell(ws, r, c, cell, fmt, book, sheet_name, stats)
+                if not write_special(ws, r, c, cell, style, fmt, formats, is_referenced(sheet_refs, r, c)):
+                    write_cell(ws, r, c, cell, fmt, book, sheet_name, stats)
+                add_cell_extras(ws, r, c, cell, lists)
 
     workbook.close()
     return {"outputPath": out, "sheets": len(book.tables), "unsupported": book.unsupported, **stats}
+
+
+def write_special(ws, r, c, cell, style, fmt, formats, referenced=False):
+    """Write cells that need more than a plain value: checkboxes, links and mixed formatting.
+    Returns False to let write_cell handle the cell normally."""
+    if cell.is_formula:
+        return False
+    bullets = extras.bullet_text(cell)
+    # Bullets are only display formatting in Numbers, so a cell a formula reads keeps its plain text.
+    if bullets and not referenced and not extras.links(cell):
+        ws.write_string(r, c, bullets, fmt)
+        return True
+    control = extras.control(cell)
+    if control and control["kind"] == "checkbox" and isinstance(cell.value, bool):
+        ws.insert_checkbox(r, c, cell.value, fmt)  # a real checkbox in Excel 365, TRUE/FALSE in older Excel
+        return True
+    links = extras.links(cell)
+    if links:  # Excel allows one link per cell; any others are listed in the cell's note
+        ws.write_url(r, c, links[0][1], formats.get({**style, "color": style.get("color", "#0563C1"), "u": 1}, None),
+                     string=str(cell.value or links[0][0]))
+        return True
+    runs = extras.rich_runs(cell)
+    if runs and len(runs) > 1:
+        base = {k: v for k, v in style.items() if k in FONT_KEYS}
+        fragments = []
+        for piece, run_style in runs:
+            fragments += [formats.get({**base, **run_style}, None), piece]
+        try:
+            ws.write_rich_string(r, c, *fragments, fmt)
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def add_cell_extras(ws, r, c, cell, lists):
+    """Comments, extra links and input rules (pop-up menus, sliders, steppers, ratings)."""
+    note = extras.comment(cell)
+    links = extras.links(cell)
+    text = note[0] if note else ""
+    if len(links) > 1:
+        text += ("\n\n" if text else "") + "Links:\n" + "\n".join(f"{label}: {url}" for label, url in links)
+    if text:
+        ws.write_comment(r, c, text, {"author": note[1] if note and note[1] else "", "x_scale": 1.6, "y_scale": 1.4})
+
+    control = extras.control(cell)
+    if not control or control["kind"] == "checkbox":
+        return
+    if control["kind"] == "popup":
+        items = [str(i) for i in control["items"]]
+        if not items:
+            return
+        inline = ",".join(items)
+        source = items if len(inline) <= 250 and not any("," in i or '"' in i for i in items) else lists.add(items)
+        ws.data_validation(r, c, r, c, {"validate": "list", "source": source})
+    else:  # stepper, slider, rating: keep the same allowed range
+        low, high, step = (float(control[k]) for k in ("min", "max", "step"))
+        whole = all(v.is_integer() for v in (low, high, step))
+        ws.data_validation(r, c, r, c, {"validate": "integer" if whole else "decimal", "criteria": "between",
+                                        "minimum": int(low) if whole else low, "maximum": int(high) if whole else high})
+
+
+class ListSheet:
+    """A hidden sheet holding pop-up menu items too long to write inline in a dropdown rule."""
+
+    def __init__(self, workbook):
+        self.workbook = workbook
+        self.ws = None
+        self.col = 0
+
+    def add(self, items):
+        if self.ws is None:
+            self.ws = self.workbook.add_worksheet("Pop-up Lists")
+            self.ws.hide()
+        for i, item in enumerate(items):
+            self.ws.write_string(i, self.col, item)
+        ref = xl_range_abs(0, self.col, len(items) - 1, self.col)
+        self.col += 1
+        return f"='Pop-up Lists'!{ref}"
 
 
 EXCEL_EPOCH = dt.datetime(1899, 12, 30)
@@ -857,8 +1121,12 @@ def write_cell(ws, r, c, cell, fmt, book, sheet_name, stats):
         ws.write_string(r, c, formatted(cell) or "#ERROR", fmt)
     elif isinstance(cell, BoolCell) or isinstance(value, bool):
         ws.write_boolean(r, c, bool(value), fmt)
+    elif isinstance(cell, DateCell) and value.year < 1900:
+        ws.write_string(r, c, formatted(cell), fmt)  # Excel can't store dates before 1900
     elif isinstance(cell, DateCell):
         ws.write_datetime(r, c, naive(value), fmt)
+    elif isinstance(cell, DurationCell) and value.total_seconds() < 0:
+        ws.write_string(r, c, formatted(cell), fmt)  # Excel shows negative times as #####
     elif isinstance(cell, DurationCell):
         ws.write_number(r, c, value.total_seconds() / 86400, fmt)
     elif isinstance(value, (int, float)):
@@ -873,9 +1141,9 @@ def write_cell(ws, r, c, cell, fmt, book, sheet_name, stats):
 def handle(request):
     cmd = request.get("cmd")
     if cmd == "preview":
-        return preview(request["path"])
+        return preview(request["path"], request.get("password"))
     if cmd == "convert":
-        return convert(request["path"], request["out"])
+        return convert(request["path"], request["out"], request.get("password"))
     if cmd == "ping":
         return {}
     raise UserError(f"Unknown command: {cmd}")
@@ -893,7 +1161,7 @@ def main():
             req_id = request.get("id")
             response = {"id": req_id, "ok": True, **handle(request)}
         except UserError as err:
-            response = {"id": req_id, "ok": False, "error": str(err)}
+            response = {"id": req_id, "ok": False, "error": str(err), **err.extra}
         except Exception as err:  # never let one bad file kill the helper
             response = {"id": req_id, "ok": False, "error": f"Conversion failed ({type(err).__name__}: {err})."}
         stdout.write(json.dumps(response, ensure_ascii=False) + "\n")

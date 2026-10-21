@@ -4,11 +4,13 @@ const ICONS = {
   ready: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>',
   done: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
   error: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.5"/></svg>',
+  locked: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
   busy: '<div class="spinner"></div>'
 };
 
 let settings = {};
-// Opened files: { id, path, name, status: loading|ready|converting|done|error, preview, sheet, output, error }
+// Opened files: { id, path, name, status: loading|locked|ready|converting|done|error, preview, sheet,
+//                 output, error, password (kept in memory only), hint }
 let files = [];
 let selectedId = null;
 let nextId = 1;
@@ -61,25 +63,39 @@ async function openFiles(paths) {
   render();
 
   for (const f of added) {
-    if (f.status !== 'loading') continue;
-    const res = await window.api.preview(f.path);
-    if (res.ok) {
-      f.preview = res;
-      f.status = 'ready';
-    } else {
-      f.status = 'error';
-      f.error = res.error;
-    }
-    render();
-    if (f.status === 'ready' && settings.autoConvert) await convert(f);
+    if (f.status === 'loading') await load(f);
   }
+}
+
+async function load(f) {
+  const res = await window.api.preview(f.path, f.password);
+  if (res.ok) {
+    f.preview = res;
+    f.status = 'ready';
+  } else if (res.needsPassword) {
+    f.status = 'locked';
+    f.error = f.password ? res.error : null;
+    f.hint = res.hint || f.hint;
+  } else {
+    f.status = 'error';
+    f.error = res.error;
+  }
+  render();
+  if (f.status === 'ready' && settings.autoConvert) await convert(f);
+}
+
+async function unlock(f, password) {
+  f.password = password;
+  f.status = 'loading';
+  render();
+  await load(f);
 }
 
 async function convert(f) {
   if (f.status !== 'ready') return;
   f.status = 'converting';
   render();
-  const res = await window.api.convert(f.path);
+  const res = await window.api.convert(f.path, f.password);
   if (res.ok) {
     f.status = 'done';
     f.output = res.outputPath;
@@ -100,6 +116,7 @@ function metaText(f) {
     case 'loading': return 'Opening…';
     case 'converting': return 'Saving…';
     case 'done': return `Saved as ${baseName(f.output)}`;
+    case 'locked': return 'Password needed';
     case 'error': return f.error;
     default: {
       const n = f.preview.sheets.length;
@@ -168,6 +185,11 @@ function renderPreview(f) {
     grid.replaceChildren(el('div', 'grid-message', 'Opening…'));
     return;
   }
+  if (f.status === 'locked') {
+    grid.replaceChildren(passwordForm(f));
+    grid.querySelector('input').focus();
+    return;
+  }
   if (!f.preview) {
     grid.replaceChildren(el('div', 'grid-message error', f.error));
     return;
@@ -204,6 +226,34 @@ function renderPreview(f) {
   }
   note.hidden = !notes.length;
   note.replaceChildren(...notes.map((n) => el('div', null, n)));
+}
+
+// The password is only kept in memory for this file while the app is open; it is never saved.
+function passwordForm(f) {
+  const form = el('form', 'unlock');
+  form.append(ICON(ICONS.locked, 'unlock-icon'), el('div', 'unlock-title', 'This file is password-protected'));
+  const input = el('input');
+  input.type = 'password';
+  input.placeholder = 'Password';
+  input.autocomplete = 'off';
+  const submit = el('button', 'btn primary', 'Open');
+  submit.type = 'submit';
+  const row = el('div', 'unlock-row');
+  row.append(input, submit);
+  form.append(row);
+  if (f.error) form.append(el('div', 'unlock-error', f.error));
+  if (f.hint) form.append(el('div', 'unlock-hint', `Hint: ${f.hint}`));
+  form.onsubmit = (e) => {
+    e.preventDefault();
+    if (input.value) unlock(f, input.value);
+  };
+  return form;
+}
+
+function ICON(svg, cls) {
+  const span = el('span', cls);
+  span.innerHTML = svg;
+  return span;
 }
 
 function describeUnsupported(u = {}) {
@@ -249,19 +299,24 @@ function applyStyle(td, s) {
 }
 
 function buildTable(sheet) {
+  // Hidden rows and columns are left out, as in Numbers; row and column labels keep their numbering.
+  const hiddenRows = new Set(sheet.hiddenRows || []);
+  const hiddenCols = new Set(sheet.hiddenCols || []);
+  const visibleCols = sheet.colWidths.map((_, c) => c).filter((c) => !hiddenCols.has(c));
+
   const table = el('table', 'grid');
   const cols = el('colgroup');
   cols.append(el('col', 'rowhead-col'));
-  sheet.colWidths.forEach((w) => {
+  visibleCols.forEach((c) => {
     const col = el('col');
-    col.style.width = `${w}px`;
+    col.style.width = `${sheet.colWidths[c]}px`;
     cols.append(col);
   });
   table.append(cols);
 
   const headRow = el('tr');
   headRow.append(el('th', 'corner'));
-  sheet.colWidths.forEach((_, c) => headRow.append(el('th', null, columnName(c))));
+  visibleCols.forEach((c) => headRow.append(el('th', null, columnName(c))));
   const head = el('thead');
   head.append(headRow);
   table.append(head);
@@ -269,17 +324,34 @@ function buildTable(sheet) {
   const spans = new Map(sheet.merges.map(([r1, c1, r2, c2]) => [`${r1},${c1}`, [r2 - r1 + 1, c2 - c1 + 1]]));
   const body = el('tbody');
   sheet.rows.forEach((row, r) => {
+    if (hiddenRows.has(r)) return;
     const tr = el('tr');
     tr.style.height = `${sheet.rowHeights[r]}px`;
     tr.append(el('th', null, String(r + 1)));
     row.forEach((cell, c) => {
-      if (cell === null) return; // covered by a merged cell
-      const [text, styleIdx] = typeof cell === 'string' ? [cell, 0] : cell;
-      const td = el('td', null, text);
+      if (cell === null || hiddenCols.has(c)) return; // covered by a merged cell, or hidden
+      const [text, styleIdx, extra = {}] = typeof cell === 'string' ? [cell, 0] : cell;
+      const td = el('td', null, extra.runs ? null : text);
       applyStyle(td, sheet.styles[styleIdx]);
+      if (extra.runs) {
+        for (const [piece, runStyle] of extra.runs) {
+          const span = el('span', null, piece);
+          applyStyle(span, sheet.styles[runStyle]);
+          td.append(span);
+        }
+      }
+      if (extra.link) {
+        td.classList.add('has-link');
+        td.title = extra.link;
+      }
+      if (extra.note) {
+        td.classList.add('has-note');
+        td.title = extra.note;
+      }
+      if (extra.control === 'popup') td.classList.add('has-popup');
       const span = spans.get(`${r},${c}`);
       if (span) { td.rowSpan = span[0]; td.colSpan = span[1]; }
-      if (text.length > 40) td.title = text;
+      if (!td.title && text.length > 40) td.title = text;
       tr.append(td);
     });
     body.append(tr);

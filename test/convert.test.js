@@ -35,7 +35,17 @@ const fixture = (name) => path.join(__dirname, 'fixtures', `${name}.numbers`);
   assert.strictEqual(charts.unsupported.charts, 11);
 
   const locked = await previewFile(fixture('encrypted'));
-  assert.ok(!locked.ok && /password/.test(locked.error));
+  assert.ok(!locked.ok && locked.needsPassword && /password/.test(locked.error));
+  const wrong = await previewFile(fixture('encrypted'), 'nope');
+  assert.ok(!wrong.ok && wrong.needsPassword && wrong.hint === 's3cr3t');
+  const unlocked = await previewFile(fixture('encrypted'), 's3cr3t');
+  assert.ok(unlocked.ok, unlocked.error);
+  const lockedOut = await convertFile(fixture('encrypted'), outDir, 's3cr3t');
+  assert.ok(lockedOut.ok && fs.existsSync(lockedOut.outputPath));
+
+  const pkg = await convertFile(fixture('folder-package'), outDir);
+  assert.ok(pkg.ok, pkg.error);
+  assert.strictEqual(path.basename(pkg.outputPath), 'folder-package.xlsx');
 
   const junk = path.join(dir, 'Broken.numbers');
   fs.writeFileSync(junk, 'not a spreadsheet');

@@ -91,8 +91,8 @@ function start() {
     return res.canceled ? null : res.filePaths[0];
   });
 
-  ipcMain.handle('files:preview', (_e, inputPath) => previewFile(inputPath));
-  ipcMain.handle('files:convert', (_e, inputPath) => convertFile(inputPath, config.outputDir));
+  ipcMain.handle('files:preview', (_e, inputPath, password) => previewFile(inputPath, password));
+  ipcMain.handle('files:convert', (_e, inputPath, password) => convertFile(inputPath, config.outputDir, password));
 
   ipcMain.handle('files:reveal', (_e, p) => shell.showItemInFolder(p));
   ipcMain.handle('files:open', (_e, p) => shell.openPath(p));

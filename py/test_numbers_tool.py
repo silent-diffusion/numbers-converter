@@ -4,8 +4,10 @@ import datetime as dt
 import os
 import sys
 import tempfile
+from types import SimpleNamespace
 
 from numbers_parser import Document
+from numbers_parser.constants import DurationStyle, DurationUnits, FormatType
 from numbers_parser.formula import FUNCTION_NAME_TO_ID
 from numbers_parser.generated import TSCEArchives_pb2 as TSCE
 from openpyxl import load_workbook
@@ -42,6 +44,7 @@ def test_date_patterns():
         "d 'de' MMMM": 'd "de" mmmm',
         "'Day' D 'of' yyyy": "m/d/yyyy",  # day-of-year has no Excel equivalent
         "K:mm": "m/d/yyyy h:mm",
+        "hhmmssSSS a": "m/d/yyyy h:mm",  # Excel only accepts fractional seconds after "s."
         "": "m/d/yyyy",
     }
     for pattern, expected in cases.items():
@@ -220,6 +223,32 @@ def test_pivot_aggregates():
     assert pivots.aggregate("sum", [None, "x"]) is None
 
 
+def test_duration_formats():
+    fmt = lambda style, largest, smallest, auto=False: SimpleNamespace(  # noqa: E731
+        duration_style=style, duration_unit_largest=largest, duration_unit_smallest=smallest,
+        use_automatic_duration_units=auto)
+    S, L, C = DurationStyle.SHORT, DurationStyle.LONG, DurationStyle.COMPACT
+    U = DurationUnits
+    two_days = 2 * 86400 + 4 * 3600 + 20 * 60 + 2
+    assert nt.duration_format(fmt(S, U.DAY, U.SECOND), two_days) == 'd"d" h"h" m"m" s"s"'
+    assert nt.duration_format(fmt(C, U.HOUR, U.SECOND), two_days) == "[h]:mm:ss"
+    assert nt.duration_format(fmt(L, U.HOUR, U.MINUTE), 3600 + 60) == '[h]" hour" m" minute"'
+    assert nt.duration_format(fmt(S, U.DAY, U.DAY), 60 * 86400) == '0"d"'  # any number of days
+    assert nt.duration_format(fmt(S, U.DAY, U.HOUR), 40 * 86400) == '[h]"h"'  # past 31 days: hours
+    assert nt.duration_format(nt.DEFAULT_DURATION_FORMAT, 10 * 86400) == '0"d"'
+
+
+def test_number_formats():
+    fmt = lambda **kw: SimpleNamespace(**{"decimal_places": 253, "show_thousands_separator": False,  # noqa: E731
+                                          "negative_style": 0, "currency_code": "USD", "use_accounting_style": False,
+                                          "fraction_accuracy": 0, **kw})
+    assert nt.builtin_number_format(fmt(format_type=FormatType.PERCENT), 6.43) == "0%"
+    assert nt.builtin_number_format(fmt(format_type=FormatType.PERCENT), 0.0533) == "0.00%"
+    assert nt.builtin_number_format(fmt(format_type=FormatType.DECIMAL, show_thousands_separator=True), 1234.56) == "#,##0.00"
+    assert nt.builtin_number_format(fmt(format_type=FormatType.FRACTION, fraction_accuracy=0xFFFFFFFE), 12.34) == "# ??/??"
+    assert nt.builtin_number_format(fmt(format_type=FormatType.CURRENCY, decimal_places=2, use_accounting_style=True), 5) == '"$"* #,##0.00'
+
+
 def test_format_number():
     assert nt.format_number(1234.5, '"$"#,##0') == "$1,235"
     assert nt.format_number(-5, '"$"#,##0.00') == "-$5.00"
@@ -237,12 +266,84 @@ def test_custom_formats_convert():
 
 
 def test_password_protected():
-    try:
-        nt.load(fixture("encrypted"))
-    except nt.UserError as err:
-        assert "password" in str(err)
-    else:
-        raise AssertionError("expected a UserError")
+    for password, expected in ((None, "password-protected"), ("wrong", "isn't right")):
+        try:
+            nt.load(fixture("encrypted"), password)
+        except nt.UserError as err:
+            assert expected in str(err) and err.extra["needsPassword"]
+            if password:
+                assert err.extra["hint"] == "s3cr3t"  # this sample's hint is its password
+        else:
+            raise AssertionError("expected a UserError")
+    assert nt.preview(fixture("encrypted"), "s3cr3t")["sheets"]
+    convert_with = os.path.join(OUT, "encrypted.xlsx")
+    nt.convert(fixture("encrypted"), convert_with, "s3cr3t")
+    assert load_workbook(convert_with).worksheets
+
+
+def test_folder_package():
+    # Numbers on a Mac can save a file as a folder; those open directly.
+    assert os.path.isdir(fixture("folder-package"))
+    result, _ = convert("folder-package")
+    assert result["sheets"] >= 1
+
+
+def test_form_controls():
+    _, wb = convert("test-actions")
+    ws = wb.worksheets[0]
+    rules = {str(dv.sqref): dv for dv in ws.data_validations.dataValidation}
+    assert rules["A5"].type == "list" and rules["A5"].formula1 == '"Item 1,Item 2,Item 3"'  # pop-up menu
+    assert rules["B2"].type == "whole" and rules["B2"].formula2 == "5"  # star rating 0-5
+    assert rules["A3"].type == "whole" and rules["A3"].formula2 == "100"  # slider
+    assert ws["A1"].value is False and ws["B1"].value is True  # checkboxes
+
+
+def test_comments_links_bullets_and_rich_text():
+    _, wb = convert("test-comments")
+    ws = wb.worksheets[0]
+    assert ws["A1"].comment.text.startswith("Comment #1") and ws["A1"].comment.author == "Jon Connell"
+
+    _, wb = convert("test-hlinks")
+    ws = wb.worksheets[0]
+    assert ws["A1"].hyperlink.target == "http://news.bbc.co.uk/"
+    assert "http://google.co.uk/" in ws["A1"].comment.text  # Excel allows one link per cell; the rest are noted
+    assert ws["A3"].value == "this is a list:\n• first item\n• second item\n• third item"
+
+    _, wb = convert("test-bullets")
+    ws = wb.worksheets[0]
+    assert ws["B1"].value == "• this\n• is some\n• bulleted\n• text"
+    # B2 is read by =LEFT(B2,1); bullets are display-only in Numbers, so its text stays as it was.
+    assert ws["B2"].value == "this\nis some\nnumbered\ntext"
+
+    out = os.path.join(OUT, "rich.xlsx")
+    nt.convert(fixture("test-formats"), out)
+    rich = load_workbook(out, rich_text=True).worksheets[0]["C7"].value
+    runs = [(str(part.text), bool(part.font.b), bool(part.font.i)) for part in rich if hasattr(part, "font")]
+    assert ("the", True, False) in runs and ("quick", False, True) in runs
+
+    preview = nt.preview(fixture("test-formats"))["sheets"][0]
+    text, _, info = preview["rows"][6][2]
+    assert text == "the quick brown fox jumped" and len(info["runs"]) == 9
+
+
+def test_hidden_rows_and_columns():
+    # No sample file has hidden rows, so mark some hidden in the loaded file (as Numbers stores them).
+    path = fixture("test-bgcolour")
+    book = nt.load(path)
+    table = book.tables[0][2]
+    model = table._model
+    bds = model.objects[table._table_id].base_data_store
+    for bucket, index in ((bds.rowHeaders.buckets[0].identifier, 1), (bds.columnHeaders.identifier, 2)):
+        headers = model.objects[bucket].headers
+        header = next((h for h in headers if h.index == index), None) or headers.add()
+        header.index, header.hidingState = index, 1
+    sheet = nt.preview(path)["sheets"][0]
+    assert sheet["hiddenRows"] == [1] and sheet["hiddenCols"] == [2]
+    out = os.path.join(OUT, "hidden.xlsx")
+    nt.convert(path, out)
+    ws = load_workbook(out).worksheets[0]
+    assert ws.row_dimensions[2].hidden and ws.column_dimensions["C"].hidden
+    nt._cache.clear()
 
 
 if __name__ == "__main__":

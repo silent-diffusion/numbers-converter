@@ -206,6 +206,34 @@ li.error .status-icon, li.error .file-meta { color: var(--danger); }
 .grid thead th { position: sticky; top: 0; z-index: 2; height: 22px; text-align: center; }
 .grid tbody th { position: sticky; left: 0; z-index: 1; text-align: right; }
 .grid thead th.corner { left: 0; z-index: 3; }
+.grid td { position: relative; }
+.grid td.has-link { color: #0563C1; text-decoration: underline; cursor: help; }
+.grid td.has-note::after {  /* red corner marker, as Excel shows notes */
+  content: ""; position: absolute; top: 0; right: 0;
+  border-style: solid; border-width: 0 7px 7px 0; border-color: transparent #d93025 transparent transparent;
+}
+.grid td.has-popup { padding-right: 16px; }
+.grid td.has-popup::after {
+  content: "▾"; position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  color: #8a8a90; font-size: 11px;
+}
+
+/* Password prompt */
+.unlock {
+  height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+  background: var(--surface); color: var(--text); padding: 24px;
+}
+.unlock-icon { color: var(--muted); }
+.unlock-title { font-weight: 600; }
+.unlock-row { display: flex; gap: 8px; }
+.unlock input {
+  width: 220px; padding: 6px 10px; font: inherit;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text);
+}
+.unlock input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.unlock-error { color: var(--danger); font-size: 12.5px; }
+.unlock-hint { color: var(--muted); font-size: 12.5px; }
+
 .preview-note { padding: 6px 14px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; display: grid; gap: 2px; }
 .preview-note[hidden] { display: none; }
 .spinner {
