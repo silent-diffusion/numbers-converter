@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('api', {
   pathForFile: (file) => webUtils.getPathForFile(file),
   pickFiles: () => ipcRenderer.invoke('files:pick'),
   pickFolder: () => ipcRenderer.invoke('folder:pick'),
+  preview: (p) => ipcRenderer.invoke('files:preview', p),
   convert: (p) => ipcRenderer.invoke('files:convert', p),
   reveal: (p) => ipcRenderer.invoke('files:reveal', p),
   open: (p) => ipcRenderer.invoke('files:open', p),

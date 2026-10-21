@@ -13,8 +13,9 @@ Convert Apple Numbers (`.numbers`) spreadsheets to Excel (`.xlsx`) on Windows, e
 
 ## Use
 
-- Drag `.numbers` files onto the window, or click **Choose files**.
-- Each file is saved as an `.xlsx` next to the original (change this in **Settings → General**). Existing files are never overwritten: you get `Budget (1).xlsx` instead.
+- Drag `.numbers` files onto the window, or click **Choose files**. Each file opens in a preview showing its sheets and cells.
+- Click **Convert & save** to save it as an `.xlsx` next to the original (change the folder in **Settings → General**). Existing files are never overwritten: you get `Budget (1).xlsx` instead.
+- To skip the button, turn on **Settings → General → Convert automatically**. Files are then saved as soon as they're opened.
 - You can also right-click a `.numbers` file → **Open with → Numbers Converter**.
 
 Every table becomes a sheet with its values. Charts, images and some formatting are not carried over.

@@ -31,13 +31,34 @@
         <p class="drop-hint" id="out-hint"></p>
       </div>
 
-      <div class="results" id="results" hidden>
-        <div class="results-head">
-          <span id="results-summary"></span>
-          <button class="btn link" id="clear">Clear</button>
+      <div class="workspace" id="workspace" hidden>
+        <aside class="filelist">
+          <div class="filelist-head">
+            <span id="files-summary"></span>
+            <button class="btn link" id="clear">Clear</button>
+          </div>
+          <ul id="list"></ul>
+          <div class="filelist-foot">
+            <button class="btn" id="add">Add files…</button>
+            <button class="btn" id="convert-all" hidden>Convert all</button>
+          </div>
+        </aside>
+
+        <div class="preview">
+          <div class="preview-head">
+            <div class="preview-title">
+              <div class="file-name" id="pv-name"></div>
+              <div class="file-meta" id="pv-meta"></div>
+            </div>
+            <div class="row-actions" id="pv-actions"></div>
+          </div>
+          <div class="sheet-tabs" id="pv-tabs"></div>
+          <div class="grid-wrap" id="pv-grid"></div>
+          <div class="preview-note" id="pv-note" hidden></div>
         </div>
-        <ul id="list"></ul>
       </div>
+
+      <div class="drop-overlay" aria-hidden="true">Drop to open</div>
     </section>
 
     <!-- Settings -->
@@ -50,6 +71,16 @@
       <div class="page" id="page-general">
         <h2>General</h2>
         <div class="card">
+          <div class="row">
+            <div>
+              <div class="label">Convert automatically</div>
+              <div class="desc">Save an Excel copy as soon as a file is opened, without clicking Convert &amp; save.</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="auto-convert">
+              <span class="slider"></span>
+            </label>
+          </div>
           <div class="row">
             <div>
               <div class="label">Save converted files</div>

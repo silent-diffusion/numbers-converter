@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const XLSX = require('xlsx');
-const { convertFile } = require('../src/convert');
+const { convertFile, previewFile } = require('../src/convert');
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'numbers-converter-'));
 const input = path.join(dir, 'Budget.numbers');
@@ -19,6 +19,13 @@ const wb = XLSX.utils.book_new();
 XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), 'Expenses');
 // SheetJS needs its Numbers template payload to write .numbers files.
 XLSX.writeFile(wb, input, { bookType: 'numbers', numbers: require('xlsx/dist/xlsx.zahl') });
+
+const preview = previewFile(input);
+assert.strictEqual(preview.sheets.length, 1);
+assert.strictEqual(preview.sheets[0].totalRows, 4);
+assert.deepStrictEqual(preview.sheets[0].rows[0], ['Item', 'Amount', 'Paid']);
+assert.strictEqual(preview.sheets[0].rows[2][1], '342.5');
+assert.deepStrictEqual(preview.sheets[0].numeric[1], [false, true, false]);
 
 const first = convertFile(input);
 assert.strictEqual(first.outputPath, path.join(dir, 'Budget.xlsx'));

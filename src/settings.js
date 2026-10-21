@@ -4,6 +4,7 @@ const { app } = require('electron');
 
 const DEFAULTS = {
   autoUpdate: true,
+  autoConvert: false, // save an .xlsx as soon as a file is opened, instead of waiting for "Convert & save"
   outputDir: null // null = save next to the original file
 };
 

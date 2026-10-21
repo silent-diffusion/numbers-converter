@@ -1,6 +1,6 @@
 const path = require('path');
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
-const { convertFile } = require('./convert');
+const { convertFile, previewFile } = require('./convert');
 const settings = require('./settings');
 const updater = require('./updater');
 
@@ -41,10 +41,10 @@ function start() {
   Menu.setApplicationMenu(null);
 
   win = new BrowserWindow({
-    width: 760,
-    height: 560,
-    minWidth: 560,
-    minHeight: 440,
+    width: 960,
+    height: 640,
+    minWidth: 640,
+    minHeight: 460,
     backgroundColor: '#f7f7f8',
     title: 'Numbers Converter',
     icon: path.join(__dirname, 'renderer', 'icon.png'),
@@ -89,6 +89,14 @@ function start() {
       properties: ['openDirectory', 'createDirectory']
     });
     return res.canceled ? null : res.filePaths[0];
+  });
+
+  ipcMain.handle('files:preview', (_e, inputPath) => {
+    try {
+      return { ok: true, ...previewFile(inputPath) };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    }
   });
 
   ipcMain.handle('files:convert', (_e, inputPath) => {
