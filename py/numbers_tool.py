@@ -5,20 +5,24 @@ Runs as a long-lived helper for the Electron app: one JSON request per line on s
 one JSON response per line on stdout.
 
   {"id": 1, "cmd": "preview", "path": "C:/x.numbers"}
-  {"id": 2, "cmd": "convert", "path": "C:/x.numbers", "out": "C:/x.xlsx"}
+  {"id": 2, "cmd": "convert", "path": "C:/x.numbers", "out": "C:/x.xlsx", "contents": true}
 """
 
+import base64
 import datetime as dt
 import json
 import os
 import re
 import sys
+import traceback
 import warnings
+import zipfile
 from collections import OrderedDict
 from types import SimpleNamespace
 from decimal import ROUND_HALF_UP, Decimal
 
 import xlsxwriter
+import xlsxwriter.exceptions
 from numbers_parser import Document
 from xlsxwriter.utility import xl_range_abs
 
@@ -171,7 +175,7 @@ _cache = OrderedDict()
 def load(path, password=None):
     """Parse a Numbers file (or a Mac folder package) into table models, cached by path + mtime."""
     if not path.lower().rstrip("\\/").endswith(".numbers"):
-        raise UserError("Not a .numbers file.")
+        raise UserError("Not a .numbers file.", reason="not-numbers")
     key = (path, os.path.getmtime(path), password)
     if key in _cache:
         _cache.move_to_end(key)
@@ -182,16 +186,21 @@ def load(path, password=None):
     except Exception as err:  # numbers-parser raises a variety of errors for bad files
         text = str(err)
         if "No password provided" in text:
-            raise UserError("This file is password-protected.", needsPassword=True) from None
+            raise UserError("This file is password-protected.", needsPassword=True, hint=password_hint(path)) from None
         if "Invalid password" in text:
             hint = re.search(r"Hint is '(.*)'", text)
             raise UserError("That password isn't right.", needsPassword=True,
                             hint=hint.group(1) if hint and hint.group(1) else None) from None
-        raise UserError("Could not read this Numbers file (it may be damaged or not a real Numbers file).") from None
+        raise UserError("Could not read this Numbers file (it may be damaged or not a real Numbers file).",
+                        reason="unreadable", details=technical(err, path), picture=embedded_picture(path)) from None
     finally:
         release_file()
 
-    book = Book(doc)
+    try:
+        book = Book(doc)
+    except UserError as err:  # e.g. no tables: the picture Numbers saved still shows what's in the file
+        err.extra.setdefault("picture", embedded_picture(path))
+        raise
     _cache[key] = book
     while len(_cache) > 4:
         _cache.popitem(last=False)
@@ -202,7 +211,6 @@ def release_file():
     """numbers-parser reads the whole archive when opening but leaves the zip file open, which on
     Windows stops the user moving or deleting the .numbers file. Close any zip it left open."""
     import gc
-    import zipfile
 
     for obj in gc.get_objects():
         if isinstance(obj, zipfile.ZipFile) and obj.fp is not None:
@@ -210,6 +218,53 @@ def release_file():
                 obj.close()
             except Exception:
                 pass
+
+
+def package_entry(path, names):
+    """The first of `names` found in a Numbers file (a zip archive or a Mac folder package), as bytes."""
+    if os.path.isdir(path):
+        for name in names:
+            entry = os.path.join(path, name)
+            if os.path.isfile(entry):
+                with open(entry, "rb") as f:
+                    return f.read()
+        return None
+    with zipfile.ZipFile(path) as z:
+        listed = set(z.namelist())
+        name = next((n for n in names if n in listed), None)
+        return z.read(name) if name else None
+
+
+def password_hint(path):
+    """The hint saved with a password-protected file (its .iwph entry), or None."""
+    try:
+        hint = (package_entry(path, [".iwph"]) or b"").decode("utf-8", "replace").strip()
+    except Exception:
+        return None
+    return hint if hint and hint != "No hint" else None
+
+
+def embedded_picture(path):
+    """The picture of the first sheet Numbers saves inside every file, as a data: URL, or None
+    (password-protected files have none)."""
+    try:
+        data = package_entry(path, ["preview.jpg", "preview-web.jpg"])
+    except Exception:
+        return None
+    if not data or not data.startswith(b"\xff\xd8") or len(data) > 4_000_000:
+        return None
+    return "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")
+
+
+def technical(err, path=None):
+    """An error's type and message for "Technical details" and problem reports, with the file's name
+    and any other path on the PC taken out."""
+    text = f"{type(err).__name__}: {err}"
+    if path:
+        for p in sorted({path, os.path.abspath(path), os.path.basename(path.rstrip("\\/"))}, key=len, reverse=True):
+            if p:
+                text = text.replace(p, "<file>")
+    return re.sub(r"[A-Za-z]:[\\/][^\s'\"]*", "<path>", text)[:400]
 
 
 class Book:
@@ -229,13 +284,15 @@ class Book:
                 self.tables.append((sheet.name, table))
             self.sheets.append((sheet._sheet_id, sheet.name, tables))
         if not self.tables:
-            raise UserError("No tables found in this file.")
+            raise UserError("No tables found in this file.", reason="no-tables")
         self.table_by_id = {table._table_id: table for _, table in self.tables}
         self.sheet_name_of = {table._table_id: sheet_name for sheet_name, table in self.tables}
         self.titles = {table._table_id: table_title(table) for _, table in self.tables}
         self.unsupported = count_drawables(doc)
+        self.chart_problems = []  # charts that couldn't be read: their Numbers type name, or "unreadable"
         try:
-            self.charts, self.unsupported["charts"] = charts.read_charts(self, CHART_TOOLS)
+            self.charts, self.chart_problems = charts.read_charts(self, CHART_TOOLS)
+            self.unsupported["charts"] = len(self.chart_problems)
         except Exception:  # never let a chart stop the tables converting
             self.charts = []
         # Pivot tables whose summary values have to be recalculated: {table_id: {(row, col): (value, source cell)}}
@@ -294,6 +351,7 @@ def table_title(table):
         style = model.objects[tm.table_name_style.identifier]
         colour = rgb_hex(rgb_from_proto(model.char_property(style, "font_color")))
         font = model.char_property(style, "font_name")
+        note_font(model, font)
         title = {"text": table.name, "font": font_name(font) or "Arial",
                  "size": round(model.char_property(style, "font_size"), 1),
                  "bold": bool(model.char_property(style, "bold")) or font_is_bold(font),
@@ -370,16 +428,45 @@ def unique_sheet_name(name, used):
 
 
 def count_drawables(doc):
+    """What's placed on the file's sheets besides tables, by kind. Text boxes are shapes with text
+    (ShapeInfoArchive) to Numbers. Charts are recounted by charts.read_charts (those it can't read)."""
     counts = {"charts": 0, "images": 0, "shapes": 0, "pivots": 0}
-    kinds = {"ChartDrawableArchive": "charts", "ImageArchive": "images", "MovieArchive": "images", "ShapeArchive": "shapes"}
+    kinds = {"ChartDrawableArchive": "charts", "ImageArchive": "images", "MovieArchive": "images",
+             "ShapeArchive": "shapes", "ShapeInfoArchive": "shapes"}
     try:
-        for obj in doc._model.objects._objects.values():
+        model = doc._model
+        for obj in model.objects._objects.values():
             kind = kinds.get(type(obj).__name__)
-            if kind:
+            if kind and on_sheet(model, obj):
                 counts[kind] += 1
     except Exception:
         pass
     return counts
+
+
+def on_sheet(model, obj):
+    """Whether a drawable (shape, text box, image, chart) sits on one of the file's sheets, directly
+    or inside a group, rather than in the document's styles."""
+    for _ in range(8):
+        parent = drawable_parent(obj)
+        if parent is None or parent not in model.objects:
+            return False
+        obj = model.objects[parent]
+        if type(obj).__name__ == "SheetArchive":
+            return True
+    return False
+
+
+def drawable_parent(obj):
+    """The id of what a drawable belongs to, from the DrawableArchive its archive extends."""
+    for _ in range(4):
+        fields = obj.DESCRIPTOR.fields_by_name
+        if "parent" in fields and obj.HasField("parent"):
+            return obj.parent.identifier
+        if "super" not in fields:
+            return None
+        obj = obj.super
+    return None
 
 
 # ---------------------------------------------------------------- cell helpers
@@ -446,6 +533,28 @@ def font_name(name):
 def font_is_bold(name):
     """Whether a PostScript font name is a bold weight (AvenirNext-DemiBold, HelveticaNeue-Bold)."""
     return bool(name) and "-" in name and bool(re.search(r"Bold|Heavy|Black|Demi", name.split("-", 1)[1]))
+
+
+# {model id: {(Mac font, Windows font)}}: Mac fonts a file's cells use that Excel gets a stand-in for,
+# noted as cells are styled, for the change report.
+FONT_SWAPS = {}
+
+
+def note_font(model, name):
+    swap = font_swap(name)
+    if swap:
+        FONT_SWAPS.setdefault(id(model), set()).add(swap)
+
+
+def font_swap(name):
+    """(the Mac font's family name, the Windows font used instead), or None for any other font."""
+    if not name:
+        return None
+    family = name.split("-")[0]
+    spaced = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", family)
+    if not {name, family, spaced} & FONT_SUBSTITUTES.keys():
+        return None
+    return ("San Francisco" if family == ".SFNS" else spaced, font_name(name))
 
 
 _style_cache = {}
@@ -538,6 +647,7 @@ def text_and_fill_style(cell):
             s["bg"] = bg
         if st.font_size and abs(st.font_size - 10) > 0.01:
             s["size"] = round(st.font_size, 1)
+        note_font(cell._model, st.font_name)
         name = font_name(st.font_name)
         if name and name != "Arial":
             s["font"] = name
@@ -629,7 +739,213 @@ def preview(path, password=None, layout_options=None):
     (see charts.describe)."""
     book = load(path, password)
     layout = book.layout(layout_options)
-    return {"sheets": [preview_sheet(book, ws) for ws in layout.sheets], "unsupported": book.unsupported}
+    sheets = [preview_sheet(book, ws) for ws in layout.sheets]  # styles the cells, noting fonts for the report
+    return {"sheets": sheets, "unsupported": book.unsupported, "report": change_report(book, layout)}
+
+
+# Why a formula keeps its last value instead of becoming an Excel formula (see translate_formula),
+# as the app explains it for one formula and for several.
+KEPT_REASONS = {
+    "function": ("uses a function Excel doesn’t have, or works out differently",
+                 "use functions Excel doesn’t have, or works out differently"),
+    "arguments": ("uses a function with arguments Excel doesn’t accept",
+                  "use functions with arguments Excel doesn’t accept"),
+    "lookup": ("uses an approximate lookup on data that isn’t sorted, which Excel can answer differently",
+               "use approximate lookups on data that isn’t sorted, which Excel can answer differently"),
+    "list": ("uses Numbers’ (A1, B2) list syntax", "use Numbers’ (A1, B2) list syntax"),
+    "date-text": ("contains a date typed as text, which Excel would read using the PC’s region settings",
+                  "contain dates typed as text, which Excel would read using the PC’s region settings"),
+    "whole": ("refers to a whole column or row in a way Excel can’t", "refer to whole columns or rows in a way Excel can’t"),
+    "pivot": ("refers to cells in a pivot table", "refer to cells in a pivot table"),
+    "cross-table": ("uses a range that spans two tables", "use ranges that span two tables"),
+    "missing": ("refers to a table or header name that isn’t in the Excel file",
+                "refer to tables or header names that aren’t in the Excel file"),
+    "array": ("uses an array constant like {1, 2, 3}", "use array constants like {1, 2, 3}"),
+    "broken": ("refers to cells that no longer exist (#REF! in Numbers)", "refer to cells that no longer exist (#REF! in Numbers)"),
+    "duration": ("gives a duration, which Excel would show as a plain number",
+                 "give durations, which Excel would show as plain numbers"),
+    "syntax": ("uses formula syntax this app can’t translate yet", "use formula syntax this app can’t translate yet"),
+}
+REPORT_CELLS = 30  # formula cells the change report lists by name
+
+
+def counted(n, one, many=None):
+    """"1 table", "3 tables"."""
+    return f"{n:,} {one if n == 1 else many or one + 's'}"
+
+
+def safely(check):
+    try:
+        return bool(check())
+    except Exception:
+        return False
+
+
+def change_report(book, layout):
+    """What will be different in Excel, worked out before saving so the app can show it beside the
+    save button: {"changes": [...], "notes": [...], "kept": [lines]}. Changes lose something (a
+    formula's calculation, an object, a sheet); notes are smaller differences. Each is {kind, title,
+    detail}; the formulas one also has "reasons" when there are several, and "cells" ({sheet, ref,
+    row, col} on the Excel worksheet) with "more" for any not listed."""
+    if layout.report is not None:
+        return layout.report
+    kept_values = {}  # reason -> {"count", "names"}
+    cells = []
+    live = conditional = grouped = captions = filtered = custom_formats = 0
+    for sheet_name, table in book.tables:
+        placed = layout.place.get(table._table_id)
+        if placed is None or table._model.objects[table._table_id].HasField("pivot_owner"):
+            continue  # pivot tables are reported as pivots
+        highlighted = False
+        for row in table.iter_rows():
+            for cell in row:
+                if getattr(cell, "_cond_style_id", None) is not None:
+                    highlighted = True
+                if isinstance(cell, NumberCell) and custom_format_dropped(cell):
+                    custom_formats += 1
+                if not cell.is_formula:
+                    continue
+                try:
+                    text = cell.formula
+                except Exception:
+                    text = None
+                if not text or not text.strip():
+                    continue
+                if excel_formula(layout, sheet_name, cell):
+                    live += 1
+                    continue
+                reason, _, name = layout.formula_reasons.get((cell._table_id, cell.row, cell.col), "syntax").partition(":")
+                entry = kept_values.setdefault(reason if reason in KEPT_REASONS else "syntax", {"count": 0, "names": set()})
+                entry["count"] += 1
+                if name:
+                    entry["names"].add(name)
+                if len(cells) < REPORT_CELLS:
+                    r, c = placed.row + cell.row, placed.col + cell.col
+                    cells.append({"sheet": placed.sheet, "ref": f"{column_letters(c)}{r + 1}", "row": r, "col": c})
+        conditional += highlighted
+        grouped += safely(lambda: table.categorized_data() is not None)
+        captions += safely(lambda: table.caption_enabled and table.caption.strip())
+        filtered += safely(lambda: extras.filter_enabled(table))
+
+    changes, notes = [], []
+    total = sum(e["count"] for e in kept_values.values())
+    if total:
+        one = total == 1
+        item = {"kind": "formulas", "title": f"{counted(total, 'formula')} {'keeps its' if one else 'keep their'} last value",
+                "cells": cells, "more": total - len(cells)}
+
+        def because(reason, entry):
+            text = KEPT_REASONS[reason][0 if entry["count"] == 1 else 1]
+            names = sorted(entry["names"])
+            return text + (" (" + ", ".join(names[:5]) + ("…" if len(names) > 5 else "") + ")" if names else "")
+
+        if len(kept_values) == 1:
+            reason, entry = next(iter(kept_values.items()))
+            item["detail"] = (f"{'It' if one else 'They'} {because(reason, entry)}, so the "
+                              f"{'result Numbers calculated is' if one else 'results Numbers calculated are'} saved instead. "
+                              f"{'It' if one else 'They'} won’t update when the data changes.")
+        else:
+            item["detail"] = "The results Numbers calculated are saved instead, and won’t update when the data changes."
+            item["reasons"] = [f"{entry['count']:,} {because(reason, entry)}"
+                               for reason, entry in sorted(kept_values.items(), key=lambda kv: -kv[1]["count"])]
+        changes.append(item)
+
+    u = book.unsupported
+    if u.get("shapes"):
+        n = u["shapes"]
+        changes.append({"kind": "shapes", "title": f"{counted(n, 'text box or shape', 'text boxes and shapes')} "
+                                                   f"{'isn’t' if n == 1 else 'aren’t'} converted yet",
+                        "detail": "Headings, notes and drawings placed on the sheets are left out of the Excel file for now."})
+    if u.get("images"):
+        n = u["images"]
+        changes.append({"kind": "images", "title": f"{counted(n, 'image')} {'isn’t' if n == 1 else 'aren’t'} converted yet",
+                        "detail": "Pictures placed on the sheets are left out of the Excel file for now."})
+    if u.get("charts"):
+        n = u["charts"]
+        bubble = any("bubble" in problem.lower() for problem in book.chart_problems)
+        changes.append({"kind": "charts", "title": f"{counted(n, 'chart')} can’t be converted",
+                        "detail": ("Bubble charts can’t be written to Excel by this app yet. " if bubble else "")
+                                  + ("Its data is still in its table." if n == 1 else "Their data is still in the tables.")})
+    if u.get("pivots"):
+        n = u["pivots"]
+        changes.append({"kind": "pivots", "title": f"{counted(n, 'pivot table')} can’t be recalculated",
+                        "detail": f"{'Its' if n == 1 else 'Their'} labels are kept, but the totals are left blank. This happens "
+                                  "with “show as” values, such as percentages or running totals."})
+    if conditional:
+        changes.append({"kind": "highlighting", "title": f"{counted(conditional, 'table')} {'uses' if conditional == 1 else 'use'} "
+                                                         "conditional highlighting",
+                        "detail": "The highlighting rules aren’t converted yet, so cells keep their normal formatting in Excel."})
+    if custom_formats:
+        changes.append({"kind": "formats", "title": f"{counted(custom_formats, 'cell')} {'has' if custom_formats == 1 else 'have'} "
+                                                    "a custom number format",
+                        "detail": "Excel gets the plain number instead, because the format can’t be translated."})
+    shown = {ws.numbers_sheet for ws in layout.sheets}
+    dropped = [name for _, name, _ in book.sheets if name not in shown]
+    if dropped:
+        quoted = [f"“{name}”" for name in dropped]
+        names = quoted[0] if len(quoted) == 1 else ", ".join(quoted[:-1]) + " and " + quoted[-1]
+        changes.append({"kind": "sheets",
+                        "title": f"The sheet {names} is left out" if len(dropped) == 1 else f"{counted(len(dropped), 'sheet')} are left out",
+                        "detail": ("It has" if len(dropped) == 1 else f"{names} have") + " no tables or charts, so there’s nothing "
+                                  "for an Excel sheet to show."})
+
+    if book.pivot_values:
+        n = len(book.pivot_values)
+        notes.append({"kind": "pivot-values", "title": f"{counted(n, 'pivot table')} {'is' if n == 1 else 'are'} saved as values",
+                      "detail": "The totals are recalculated and match Numbers, but in Excel they’re plain values, not a "
+                                "PivotTable you can rearrange."})
+    flat = sum(1 for chart in book.charts if chart.flat)
+    if flat:
+        notes.append({"kind": "3d", "title": f"{counted(flat, '3D chart')} {'is' if flat == 1 else 'are'} drawn flat",
+                      "detail": "Excel files from this app don’t have 3D charts yet, so the same chart is drawn in 2D."})
+    interactive = sum(1 for chart in book.charts if chart.interactive)
+    if interactive:
+        notes.append({"kind": "interactive", "title": f"{counted(interactive, 'interactive chart')} "
+                                                      f"{'shows' if interactive == 1 else 'show'} every data set at once",
+                      "detail": "Excel has no interactive charts, so all the data sets are drawn together."})
+    if grouped:
+        notes.append({"kind": "categories", "title": f"{counted(grouped, 'table')} {'is' if grouped == 1 else 'are'} grouped into categories",
+                      "detail": "Excel gets every row in its original order, without the group rows and their summaries."})
+    if filtered:
+        notes.append({"kind": "filters", "title": f"{counted(filtered, 'table')} {'has' if filtered == 1 else 'have'} filters",
+                      "detail": "The rows they hide stay hidden and Excel shows filter buttons, but the filter rules aren’t carried over."})
+    if captions:
+        notes.append({"kind": "captions", "title": f"{counted(captions, 'table caption')} {'isn’t' if captions == 1 else 'aren’t'} carried over",
+                      "detail": "The caption text shown under the table is left out."})
+    swaps = sorted(FONT_SWAPS.get(id(book.doc._model), set()))
+    if swaps:
+        if len(swaps) == 1:
+            title, detail = f"{swaps[0][0]} shows as {swaps[0][1]}", "Windows doesn’t have this Mac font, so Excel uses a similar one."
+        else:
+            title = f"{counted(len(swaps), 'font')} are replaced"
+            detail = "Windows doesn’t have these Mac fonts, so Excel uses similar ones: " + "; ".join(f"{a} → {b}" for a, b in swaps) + "."
+        notes.append({"kind": "fonts", "title": title, "detail": detail + " Some text may wrap a little differently."})
+
+    charts_kept = len(book.charts)
+    kept = [counted(len(book.tables), "table") + (f" and {counted(charts_kept, 'chart')}, linked to the data" if charts_kept else "")]
+    if live:
+        kept.append(f"{counted(live, 'formula')} that {'keeps' if live == 1 else 'keep'} calculating in Excel")
+    kept.append("Formatting, borders and number formats")
+    layout.report = {"changes": changes, "notes": notes, "kept": kept}
+    return layout.report
+
+
+_custom_dropped = {}
+
+
+def custom_format_dropped(cell):
+    """Whether a number cell has a custom Numbers format too complex to give Excel (it shows General)."""
+    fmt_id = cell._currency_format_id if cell._currency_format_id is not None else cell._num_format_id
+    if fmt_id is None:
+        return False
+    key = (id(cell._model), cell._table_id, fmt_id)
+    if key not in _custom_dropped:
+        try:
+            custom = cell._model.table_format(cell._table_id, fmt_id).HasField("custom_uid")
+            _custom_dropped[key] = custom and excel_number_format(cell) is None
+        except Exception:
+            _custom_dropped[key] = False
+    return _custom_dropped[key]
 
 
 def preview_sheet(book, ws):
@@ -1019,17 +1335,23 @@ def is_referenced(refs, r, c):
 
 
 def excel_formula(layout, sheet_name, cell):
-    """The cell's formula in Excel form (None if it has to stay a value), translated once per cell
-    for each layout."""
+    """The cell's formula in Excel form (None if it has to stay a value, with the reason in
+    layout.formula_reasons), translated once per cell for each layout."""
     key = (cell._table_id, cell.row, cell.col)
     if key not in layout.formulas:
+        why = []
         try:
             # Numbers returns durations from date maths where Excel returns plain numbers (e.g.
             # NETWORKDAYS), which the duration format would then show as hours, so those keep values.
-            layout.formulas[key] = (None if isinstance(cell, DurationCell)
-                                    else translate_formula(cell.formula, layout, sheet_name, cell))
+            if isinstance(cell, DurationCell):
+                excel, why = None, ["duration"]
+            else:
+                excel = translate_formula(cell.formula, layout, sheet_name, cell, why)
         except Exception:
-            layout.formulas[key] = None
+            excel, why = None, ["error"]
+        layout.formulas[key] = excel
+        if excel is None:
+            layout.formula_reasons[key] = why[0] if why else "error"
     return layout.formulas[key]
 
 
@@ -1202,11 +1524,17 @@ def cached_value_of(value):
     return delta.days + delta.seconds / 86400
 
 
-def translate_formula(formula, layout, sheet_name, cell=None):
-    """Numbers formula text -> Excel formula, or None if it can't be represented safely. `cell` is
-    the formula's own cell; references are placed where their tables sit (layout.place)."""
+def translate_formula(formula, layout, sheet_name, cell=None, why=None):
+    """Numbers formula text -> Excel formula, or None if it can't be represented safely, with the
+    reason (a KEPT_REASONS key, ":function name" for some) appended to `why`. `cell` is the formula's
+    own cell; references are placed where their tables sit (layout.place)."""
+    def kept(reason):
+        if why is not None:
+            why.append(reason)
+        return None
+
     if not formula or not formula.strip():
-        return None  # e.g. pivot table summaries, which numbers-parser can't decode
+        return kept("empty")  # e.g. pivot table summaries, which numbers-parser can't decode
     place = getattr(layout, "place", {})
     own_table = cell._table_id if cell is not None else None
 
@@ -1229,22 +1557,22 @@ def translate_formula(formula, layout, sheet_name, cell=None):
             stack.append([None, 0, False, [[]], None])
         elif kind == "op" and text == ",":
             if not stack:
-                return None
+                return kept("syntax")
             stack[-1][1] += 1
             stack[-1][3].append([])
         elif kind == "op" and text == ")":
             if not stack:
-                return None
+                return kept("syntax")
             name, commas, seen, args, at = stack.pop()
             if not name and commas:
-                return None  # Numbers' (A1,B2) list syntax; Excel reads it as a union and gives #VALUE!
+                return kept("list")  # Numbers' (A1,B2) list syntax; Excel reads it as a union and gives #VALUE!
             if name:
                 count = commas + 1 if (commas or seen) else 0
                 low, high = EXCEL_FUNCTIONS[name]
                 if count < low or (high is not None and count > high):
-                    return None
+                    return kept("arguments:" + name)
                 if name in LOOKUP_ARGUMENTS and not lookup_is_safe(name, args, layout.book):
-                    return None
+                    return kept("lookup:" + name)
                 if name in ("ROW", "COLUMN"):
                     # Numbers counts rows (columns) within a table, Excel across the sheet, where
                     # the table may start further down (right): its title row, other tables.
@@ -1256,7 +1584,7 @@ def translate_formula(formula, layout, sheet_name, cell=None):
                         continue
         if kind == "str":
             if re.search(r"\d{1,4}[/.-]\d{1,2}[/.-]\d{1,4}", text):
-                return None  # dates written as text are read using the computer's region settings
+                return kept("date-text")  # dates written as text are read using the computer's region settings
             out.append(text)
         elif kind == "xref":
             *names, cells = [p.strip("'") for p in text.split("::")]
@@ -1269,14 +1597,14 @@ def translate_formula(formula, layout, sheet_name, cell=None):
                     or layout.by_sheet.get(names[0])
                 )
             if target is None or target not in place:
-                return None
+                return kept("missing")
             out.append("'" + place[target].sheet.replace("'", "''") + "'!" + shift_rows(cells, *offsets(target)))
         elif kind == "ref":
             out.append(shift_rows(text, *offsets(own_table)))
         elif kind == "func":
             name = text.rstrip("( \t")
             if name not in EXCEL_FUNCTIONS:
-                return None
+                return kept("function:" + name)
             stack.append([name, 0, False, [[]], len(out)])
             out.append(name + "(")
         elif kind in ("bool", "num", "op", "ws"):
@@ -1291,13 +1619,24 @@ def translate_formula(formula, layout, sheet_name, cell=None):
             as_range = bool(stack and stack[-1][0]) and opens_argument and after in (",", ")")
             excel = exact_reference(text, layout, own_table, cell, as_range) if place else None
             if excel is None:
-                return None
+                return kept(reference_problem(text, place))
             out.append(excel)
-        else:
-            return None  # array constants, ranges across tables, unknown syntax, etc.
+        else:  # array constants, ranges across tables (left as ⟦a⟧:⟦b⟧), unknown syntax
+            return kept({"{": "array", ":": "cross-table", "#": "broken"}.get(text, "syntax"))
     if stack:
-        return None
+        return kept("syntax")
     return "=" + "".join(out)
+
+
+def reference_problem(code, place):
+    """Why exact_reference couldn't place a reference (a KEPT_REASONS key)."""
+    match = EXACT.fullmatch(code)
+    placed = place.get(int(match.group(1))) if match else None
+    if placed is None or placed.table is None:
+        return "missing"
+    if placed.table._model.objects[placed.table._table_id].HasField("pivot_owner"):
+        return "pivot"
+    return "whole"  # a whole column or row used where Excel needs cells
 
 
 # ---------------------------------------------------------------- convert
@@ -1406,7 +1745,8 @@ def write_title(ws, row, col, title, table, formats, background):
         ws.write_string(row, col, title["text"], fmt)
 
 
-def convert(path, out, password=None, layout_options=None):
+def convert(path, out, password=None, layout_options=None, contents=False):
+    """Writes the workbook. `contents` adds a first sheet linking to every table."""
     book = load(path, password)
     layout = book.layout(layout_options)
     workbook = xlsxwriter.Workbook(out, {"use_future_functions": True, "strings_to_numbers": False,
@@ -1416,6 +1756,8 @@ def convert(path, out, password=None, layout_options=None):
     stats = {"formulas": 0, "formulasAsValues": 0}
     refs = referenced_cells(layout)
     worksheets = {}
+    # Added first so it's the first tab; filled in once every table has its place.
+    contents_sheet = workbook.add_worksheet(unique_sheet_name("Contents", set(layout.used_names))) if contents else None
 
     for plan in layout.sheets:
         sheet = worksheets[plan.name] = workbook.add_worksheet(plan.name)
@@ -1440,8 +1782,42 @@ def convert(path, out, password=None, layout_options=None):
 
     stats["charts"] = charts.write_charts(workbook, layout, worksheets, cell_info,
                                           lambda name: unique_sheet_name(name, set(layout.used_names)))
-    workbook.close()
-    return {"outputPath": out, "sheets": len(layout.sheets), "unsupported": book.unsupported, **stats}
+    if contents_sheet is not None:
+        write_contents(contents_sheet, layout, formats, os.path.basename(path.rstrip("\\/")))
+    try:
+        workbook.close()
+    except xlsxwriter.exceptions.FileCreateError as err:  # usually the file is open in Excel
+        raise UserError("Couldn't save the Excel file. If it's open in Excel, close it and try again.",
+                        reason="save", details=technical(err, out)) from None
+    return {"outputPath": out, "sheets": len(layout.sheets), "contents": contents_sheet is not None,
+            "unsupported": book.unsupported, **stats}
+
+
+def write_contents(ws, layout, formats, file_name):
+    """A sheet listing every table with a link to it, like the summary sheet Numbers can add when it
+    exports: the Numbers sheet, the table's name, and the Excel sheet (and cell) it's on."""
+    ws.hide_gridlines(2)
+    ws.set_column(0, 1, 30)
+    ws.set_column(2, 2, 42)
+    ws.set_row(0, 24)
+    ws.write_string(0, 0, "Contents", formats.get({"b": 1, "size": 16}, None))
+    ws.write_string(1, 0, file_name, formats.get({"color": "#5C5C5C"}, None))
+    heading = formats.get({"b": 1, "bb": [1, "#8F8F8F", "solid"]}, None)
+    plain, link = formats.get({}, None), formats.get({"color": "#0563C1", "u": 1}, None)
+    for c, text in enumerate(("Numbers sheet", "Table", "In Excel")):
+        ws.write_string(3, c, text, heading)
+    row = 4
+    for plan in layout.sheets:
+        entries = [(placed.table.name, placed.title_row if placed.title_row is not None else placed.row, placed.col)
+                   for placed in plan.tables] or [("Charts", 0, 0)]
+        for name, r, c in entries:
+            cell = f"{column_letters(c)}{r + 1}"
+            sheet = plan.name.replace("'", "''")
+            ws.write_string(row, 0, plan.numbers_sheet, plain)
+            ws.write_string(row, 1, name, plain)
+            ws.write_url(row, 2, f"internal:'{sheet}'!{cell}", link,
+                         string=plan.name if len(entries) == 1 else f"{plan.name}, cell {cell}")
+            row += 1
 
 
 def write_table(sheet, placed, layout, formats, lists, stats, sheet_refs):
@@ -1624,7 +2000,8 @@ def handle(request):
     if cmd == "preview":
         return preview(request["path"], request.get("password"), request.get("layout"))
     if cmd == "convert":
-        return convert(request["path"], request["out"], request.get("password"), request.get("layout"))
+        return convert(request["path"], request["out"], request.get("password"), request.get("layout"),
+                       bool(request.get("contents")))
     if cmd == "ping":
         return {}
     raise UserError(f"Unknown command: {cmd}")
@@ -1632,19 +2009,22 @@ def handle(request):
 
 def main():
     stdout = open(sys.stdout.fileno(), "w", encoding="utf-8", newline="\n", closefd=False)
+    warnings.showwarning = lambda *args, **kwargs: None  # numbers-parser's notes (e.g. unknown fonts) aren't errors
     for line in sys.stdin.buffer:
         line = line.strip()
         if not line:
             continue
-        req_id = None
+        req_id, path = None, None
         try:
             request = json.loads(line)
-            req_id = request.get("id")
+            req_id, path = request.get("id"), request.get("path")
             response = {"id": req_id, "ok": True, **handle(request)}
         except UserError as err:
             response = {"id": req_id, "ok": False, "error": str(err), **err.extra}
         except Exception as err:  # never let one bad file kill the helper
-            response = {"id": req_id, "ok": False, "error": f"Conversion failed ({type(err).__name__}: {err})."}
+            traceback.print_exc(file=sys.stderr)  # the app writes this to its local error log
+            response = {"id": req_id, "ok": False, "error": "This file couldn't be converted.", "reason": "failed",
+                        "details": technical(err, path)}
         stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
         stdout.flush()
 

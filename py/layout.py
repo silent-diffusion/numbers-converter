@@ -90,6 +90,8 @@ class Layout:
         self.place = {}        # {table id: Placed}
         self.used_names = set()
         self.formulas = {}     # formula translations for this layout (see numbers_tool.excel_formula)
+        self.formula_reasons = {}  # why formulas that couldn't be translated keep their values
+        self.report = None     # what will be different in Excel (numbers_tool.change_report), once worked out
         for sheet_id, sheet_name, tables in book.sheets:
             mode = chosen.get(sheet_name, default)
             footprints = [measure(table) for table in tables]

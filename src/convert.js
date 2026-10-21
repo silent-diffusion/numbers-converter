@@ -16,10 +16,15 @@ function helperCommand() {
 let child = null;
 let nextId = 1;
 const pending = new Map();
+let logError = () => {}; // where the helper's error output goes (the app's local log)
+
+function setLogger(fn) {
+  logError = fn;
+}
 
 function startHelper() {
   const [cmd, args] = helperCommand();
-  child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+  child = spawn(cmd, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
   let buffer = '';
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk) => {
@@ -34,9 +39,13 @@ function startHelper() {
       if (req) { pending.delete(msg.id); req.resolve(msg); }
     }
   });
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', (chunk) => logError(chunk));
   const fail = () => {
     child = null;
-    for (const req of pending.values()) req.resolve({ ok: false, error: 'The converter stopped unexpectedly. Please try again.' });
+    for (const req of pending.values()) {
+      req.resolve({ ok: false, reason: 'stopped', error: 'The converter stopped unexpectedly. Please try again.' });
+    }
     pending.clear();
   };
   child.on('exit', fail);
@@ -66,6 +75,13 @@ function uniquePath(dir, base, ext) {
   return candidate;
 }
 
+// Where saving the file now would write its Excel copy: next to it (or in `outputDir`), never over a file.
+function targetPath(inputPath, outputDir) {
+  const dir = outputDir || path.dirname(inputPath);
+  const base = path.basename(inputPath.replace(/[\\/]+$/, ''), '.numbers');
+  return uniquePath(dir, base, '.xlsx');
+}
+
 // `layout` says how Numbers sheets with several tables are laid out:
 // { default: 'tables' | 'sheet', sheets: { [Numbers sheet name]: 'tables' | 'sheet' } }
 // ('tables': a worksheet per table; 'sheet': one worksheet per Numbers sheet, laid out as in Numbers).
@@ -73,10 +89,11 @@ function previewFile(inputPath, password, layout) {
   return request({ cmd: 'preview', path: inputPath, password, layout });
 }
 
-function convertFile(inputPath, outputDir, password, layout) {
-  const dir = outputDir || path.dirname(inputPath);
-  const base = path.basename(inputPath.replace(/[\\/]+$/, ''), '.numbers');
-  return request({ cmd: 'convert', path: inputPath, out: uniquePath(dir, base, '.xlsx'), password, layout });
+// `options.contents` adds a first sheet linking to every table. `options.replace` is a copy of this file
+// the app saved earlier, written over (rather than adding a "(1)" copy) when it saves the file again.
+function convertFile(inputPath, outputDir, password, layout, options = {}) {
+  const out = options.replace || targetPath(inputPath, outputDir);
+  return request({ cmd: 'convert', path: inputPath, out, password, layout, contents: Boolean(options.contents) });
 }
 
-module.exports = { convertFile, previewFile, stopHelper };
+module.exports = { convertFile, previewFile, targetPath, stopHelper, setLogger };

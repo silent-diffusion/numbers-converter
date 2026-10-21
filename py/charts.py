@@ -274,23 +274,27 @@ class Chart:
         self.frame = None            # (x, y, w, h) on the canvas of everything it draws: body, title, labels, legend
         self.plot = None             # where its plot goes: its body, or a little less for some pies
         self.size = None             # (width, height) in pixels
+        self.flat = False            # a 3D chart, drawn flat in Excel
+        self.interactive = False     # an interactive chart, which shows every data set at once in Excel
 
 
 def read_charts(book, tools):
-    """[Chart] for every chart in the document, plus how many couldn't be read. `tools` gives a
-    cell's text as Numbers shows it (text) and its Excel number format (number_format), and the
-    Windows font for a Mac font (font, bold)."""
+    """[Chart] for every chart in the document, plus why any couldn't be read: [Numbers chart type
+    name, or "unreadable"]. `tools` gives a cell's text as Numbers shows it (text) and its Excel
+    number format (number_format), and the Windows font for a Mac font (font, bold)."""
     model = book.tables[0][1]._model
-    found, skipped = [], 0
+    found, problems = [], []
     for oid, obj in list(model.objects._objects.items()):
         if type(obj).__name__ != "ChartDrawableArchive":
             continue
         try:
             found.append(read_chart(book, model, oid, obj, tools))
-        except Exception:  # Unsupported, or a chart stored in a way we don't recognise
-            skipped += 1
+        except Unsupported as err:
+            problems.append(str(err))
+        except Exception:  # a chart stored in a way we don't recognise
+            problems.append("unreadable")
     found.sort(key=lambda c: (c.body[1], c.body[0]))
-    return found, skipped
+    return found, problems
 
 
 def read_chart(book, model, oid, drawable, tools):
@@ -300,6 +304,8 @@ def read_chart(book, model, oid, drawable, tools):
         raise Unsupported(type_name)  # bubble charts: Excel's take their data in a different shape
     chart = Chart(oid)
     chart.kind, chart.subtype = TYPES[type_name]
+    chart.flat = type_name.endswith("3D")
+    chart.interactive = type_name.startswith("multiData")
     style, nonstyle = [c.chart_style.identifier], [c.chart_non_style.identifier]
     g = drawable.super.geometry
     chart.body = (g.position.x, g.position.y, g.size.width, g.size.height)

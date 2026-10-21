@@ -7,131 +7,257 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <img src="icon.png" alt="" width="22" height="22">
-      <span>Numbers Converter</span>
-    </div>
-    <nav class="tabs" role="tablist">
-      <button class="tab active" data-view="convert" role="tab">Convert</button>
-      <button class="tab" data-view="settings" role="tab">Settings <span class="dot" id="update-dot" hidden></span></button>
-    </nav>
+  <header class="titlebar">
+    <img class="app-icon" src="icon.png" alt="" width="16" height="16">
+    <span class="app-title">Numbers Converter</span>
+    <div class="fill"></div>
+    <button class="update-pill" id="update-pill" hidden>
+      <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3.5"/><path d="m4 7.5 4-4 4 4"/></svg>
+      Update ready · Restart
+    </button>
+    <button class="icon-btn" id="settings-btn" aria-label="Settings" title="Settings (Ctrl+,)">
+      <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.9 1.75h2.2l.35 1.62c.43.15.83.38 1.18.67l1.58-.5 1.1 1.9-1.23 1.11a4.4 4.4 0 0 1 0 1.36l1.23 1.11-1.1 1.9-1.58-.5c-.35.29-.75.52-1.18.67l-.35 1.62H6.9l-.35-1.62a4.2 4.2 0 0 1-1.18-.67l-1.58.5-1.1-1.9 1.23-1.11a4.4 4.4 0 0 1 0-1.36L2.69 5.44l1.1-1.9 1.58.5c.35-.29.75-.52 1.18-.67z"/><circle cx="8" cy="8" r="2"/></svg>
+    </button>
   </header>
 
   <main>
-    <!-- Convert -->
-    <section class="view" id="view-convert">
-      <div class="drop" id="drop" tabindex="0">
-        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M12 18v-6"/><path d="m9 15 3 3 3-3"/>
-        </svg>
-        <p class="drop-title">Drop .numbers files here</p>
-        <p class="drop-sub">or</p>
-        <button class="btn primary" id="pick">Choose files</button>
-        <p class="drop-hint" id="out-hint"></p>
-      </div>
-
-      <div class="workspace" id="workspace" hidden>
-        <aside class="filelist">
-          <div class="filelist-head">
-            <span id="files-summary"></span>
-            <button class="btn link" id="clear">Clear</button>
-          </div>
-          <ul id="list"></ul>
-          <div class="filelist-foot">
-            <button class="btn" id="add">Add files…</button>
-            <button class="btn" id="convert-all" hidden>Convert all</button>
-          </div>
-        </aside>
-
-        <div class="preview">
-          <div class="preview-head">
-            <div class="preview-title">
-              <div class="file-name" id="pv-name"></div>
-              <div class="file-meta" id="pv-meta"></div>
-            </div>
-            <div class="row-actions" id="pv-actions"></div>
-          </div>
-          <div class="sheet-tabs" id="pv-tabs"></div>
-          <div class="grid-wrap" id="pv-grid"></div>
-          <div class="preview-note" id="pv-note" hidden></div>
+    <!-- First launch: nothing open yet -->
+    <section class="view start" id="view-start">
+      <div class="drop-card" id="drop">
+        <svg class="drop-icon" width="48" height="48" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M12 18v-6"/><path d="m9 15 3 3 3-3"/></svg>
+        <h1>Drop Numbers files here</h1>
+        <p class="lead">Each file opens in a preview first, so you can check it before you save an Excel copy.</p>
+        <div class="start-actions">
+          <button class="btn primary large" id="pick" title="Choose files (Ctrl+O)">Choose files…</button>
+          <span class="hint">or press Ctrl+O</span>
         </div>
+        <button class="link-btn" id="pick-packages">Open a Mac package folder instead</button>
+        <div class="divider"></div>
+        <p class="privacy-line">
+          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.75 2.75 3.6v3.9c0 3.05 2.2 5.55 5.25 6.75 3.05-1.2 5.25-3.7 5.25-6.75V3.6z"/><path d="m5.75 8 1.6 1.6 2.9-3.1"/></svg>
+          Converted on this PC. Nothing is uploaded.
+        </p>
+        <p class="hint"><span id="out-hint"></span> <button class="link-btn small" id="change-out">Change</button></p>
       </div>
+    </section>
 
-      <div class="drop-overlay" aria-hidden="true">Drop to open</div>
+    <!-- Files: the list beside a preview of the selected one -->
+    <section class="view files" id="view-files" hidden>
+      <aside class="filelist" aria-label="Files">
+        <div class="filelist-head">
+          <span class="filelist-title">Files</span>
+          <span class="filelist-count" id="files-summary"></span>
+          <div class="fill"></div>
+          <button class="icon-btn" id="add" aria-label="Add files" title="Add files (Ctrl+O)">
+            <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.25v9.5M3.25 8h9.5"/></svg>
+          </button>
+          <div class="menu-wrap">
+            <button class="icon-btn" id="more" aria-label="More options" title="More options" aria-haspopup="menu" aria-expanded="false">
+              <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle class="dot" cx="3.5" cy="8" r="1"/><circle class="dot" cx="8" cy="8" r="1"/><circle class="dot" cx="12.5" cy="8" r="1"/></svg>
+            </button>
+            <div class="menu" id="more-menu" role="menu" hidden>
+              <button role="menuitem" id="menu-packages">Open a Mac package folder…</button>
+              <button role="menuitem" id="menu-clear">Clear the list</button>
+            </div>
+          </div>
+        </div>
+        <ul class="file-rows" id="list"></ul>
+        <div class="filelist-foot">
+          <button class="btn" id="convert-all" hidden title="Convert all (Ctrl+Shift+S)"></button>
+          <p class="privacy-line small">
+            <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.75 2.75 3.6v3.9c0 3.05 2.2 5.55 5.25 6.75 3.05-1.2 5.25-3.7 5.25-6.75V3.6z"/><path d="m5.75 8 1.6 1.6 2.9-3.1"/></svg>
+            Converted on this PC. Nothing is uploaded.
+          </p>
+        </div>
+      </aside>
+
+      <section class="preview" aria-label="Preview">
+        <div class="preview-head">
+          <div class="preview-title">
+            <div class="file-name" id="pv-name"></div>
+            <div class="file-meta" id="pv-meta"></div>
+          </div>
+          <div class="row-actions" id="pv-actions"></div>
+        </div>
+        <div class="save-error" id="pv-save-error" role="alert" hidden></div>
+        <div class="preview-body" id="pv-body">
+          <div class="grid-wrap" id="pv-grid" tabindex="0" aria-label="Sheet preview"></div>
+          <aside class="changes" id="changes" aria-label="What changes in Excel" hidden></aside>
+        </div>
+        <div class="preview-note" id="pv-note" hidden></div>
+        <div class="bottom-bar" id="pv-bottom">
+          <div class="sheet-tabs" id="pv-tabs" role="tablist" aria-label="Excel sheets"></div>
+          <div id="pv-layout"></div>
+        </div>
+      </section>
     </section>
 
     <!-- Settings -->
     <section class="view settings" id="view-settings" hidden>
-      <aside class="subnav">
-        <button class="subtab active" data-page="general">General</button>
-        <button class="subtab" data-page="updates">Updates</button>
-      </aside>
+      <div class="settings-inner">
+        <div class="settings-head">
+          <button class="icon-btn" id="back" aria-label="Back" title="Back (Esc)">
+            <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8H3.25"/><path d="M7.5 3.5 3 8l4.5 4.5"/></svg>
+          </button>
+          <h1>Settings</h1>
+        </div>
 
-      <div class="page" id="page-general">
-        <h2>General</h2>
+        <h2>Converting</h2>
         <div class="card">
           <div class="row">
-            <div>
-              <div class="label">Convert automatically</div>
-              <div class="desc">Save an Excel copy as soon as a file is opened, without clicking Convert &amp; save.</div>
+            <div class="row-text">
+              <div class="label" id="auto-convert-label">Convert files as soon as they open</div>
+              <div class="desc">Saves an Excel copy right away, with your layout choices. When this is off, files open in the preview first.</div>
             </div>
-            <label class="switch">
-              <input type="checkbox" id="auto-convert">
-              <span class="slider"></span>
-            </label>
+            <span class="switch-word" id="auto-convert-word" aria-hidden="true"></span>
+            <button class="switch" id="auto-convert" role="switch" aria-labelledby="auto-convert-label"><span class="knob"></span></button>
           </div>
           <div class="row">
-            <div>
-              <div class="label">Sheets with more than one table</div>
-              <div class="desc">Put each table on its own Excel sheet, or keep them together on one sheet, laid out as in Numbers. You can also switch each sheet in the preview.</div>
-            </div>
-            <div class="segmented" id="sheet-layout" role="radiogroup" aria-label="Sheets with more than one table">
-              <button role="radio" data-layout="tables">Separate sheets</button>
-              <button role="radio" data-layout="sheet">One sheet</button>
-            </div>
-          </div>
-          <div class="row">
-            <div>
-              <div class="label">Save converted files</div>
+            <div class="row-text">
+              <div class="label">Save Excel files</div>
               <div class="desc" id="out-desc"></div>
             </div>
             <div class="row-actions">
-              <button class="btn" id="choose-out">Choose folder…</button>
               <button class="btn link" id="reset-out" hidden>Use original folder</button>
+              <button class="btn" id="choose-out">
+                <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.75 4.25c0-.69.56-1.25 1.25-1.25h3.1l1.4 1.5H13c.69 0 1.25.56 1.25 1.25v6.25c0 .69-.56 1.25-1.25 1.25H3c-.69 0-1.25-.56-1.25-1.25z"/></svg>
+                Choose folder…
+              </button>
             </div>
           </div>
+          <div class="row">
+            <div class="row-text">
+              <div class="label" id="sheet-layout-label">Sheets with more than one table</div>
+              <div class="desc">Each table on its own Excel sheet, or all of a sheet’s tables on one Excel sheet, placed as in Numbers. You can still change any sheet in the preview.</div>
+            </div>
+            <div class="segmented" id="sheet-layout" role="radiogroup" aria-labelledby="sheet-layout-label">
+              <button role="radio" data-layout="tables">
+                <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.75" y="3.25" width="5.25" height="9.5" rx="1"/><rect x="9" y="3.25" width="5.25" height="9.5" rx="1"/></svg>
+                Separate sheets
+              </button>
+              <button role="radio" data-layout="sheet">
+                <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><rect x="1.75" y="2.25" width="12.5" height="11.5" rx="1.25"/><path d="M4.25 5.25h4M4.25 7.25h4M8.5 10h3.25M8.5 11.75h3.25"/></svg>
+                One sheet
+              </button>
+            </div>
+          </div>
+          <div class="row">
+            <div class="row-text">
+              <div class="label" id="contents-label">Add a Contents sheet</div>
+              <div class="desc">Starts the Excel file with a sheet that links to every table, like the summary sheet Numbers can add when it exports.</div>
+            </div>
+            <span class="switch-word" id="contents-word" aria-hidden="true"></span>
+            <button class="switch" id="contents" role="switch" aria-labelledby="contents-label"><span class="knob"></span></button>
+          </div>
         </div>
-      </div>
 
-      <div class="page" id="page-updates" hidden>
+        <h2>Privacy</h2>
+        <div class="card privacy-card">
+          <svg class="privacy-icon" width="22" height="22" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.75 2.75 3.6v3.9c0 3.05 2.2 5.55 5.25 6.75 3.05-1.2 5.25-3.7 5.25-6.75V3.6z"/><path d="m5.75 8 1.6 1.6 2.9-3.1"/></svg>
+          <div>
+            <div class="label">Your files stay on this PC</div>
+            <div class="desc">Numbers Converter does all of its work on your computer. It never uploads your files, needs no account and collects no usage data. It only goes online to check GitHub for updates, which you can turn off below.</div>
+            <button class="link-btn small" data-link="https://github.com/silent-diffusion/numbers-converter#privacy">How the app handles your data</button>
+          </div>
+        </div>
+
         <h2>Updates</h2>
         <div class="card">
           <div class="row">
-            <div>
-              <div class="label">Automatic updates</div>
-              <div class="desc">Download and install new versions in the background.</div>
+            <div class="row-text">
+              <div class="label" id="auto-update-label">Check for updates automatically</div>
+              <div class="desc">Looks for new versions on GitHub when the app starts and every 6 hours. They download in the background and install the next time you restart. When this is off, the app never goes online on its own.</div>
             </div>
-            <label class="switch">
-              <input type="checkbox" id="auto-update">
-              <span class="slider"></span>
-            </label>
+            <span class="switch-word" id="auto-update-word" aria-hidden="true"></span>
+            <button class="switch" id="auto-update" role="switch" aria-labelledby="auto-update-label"><span class="knob"></span></button>
           </div>
           <div class="row">
-            <div>
-              <div class="label">Version <span id="version"></span></div>
-              <div class="desc" id="update-status">—</div>
+            <div class="row-text">
+              <div class="label" id="version-label"></div>
+              <div class="desc"><span id="update-status"></span> <button class="link-btn small" data-link="https://github.com/silent-diffusion/numbers-converter/releases">What’s new</button></div>
               <div class="progress" id="progress" hidden><div id="progress-bar"></div></div>
             </div>
             <div class="row-actions">
-              <button class="btn primary" id="install" hidden>Restart to update</button>
+              <button class="btn primary" id="install" hidden>Restart now</button>
               <button class="btn" id="check">Check for updates</button>
             </div>
+          </div>
+        </div>
+
+        <h2>Help</h2>
+        <div class="card">
+          <div class="row stacked">
+            <div class="label">Keyboard shortcuts</div>
+            <dl class="shortcuts">
+              <div><dt><kbd>Ctrl+O</kbd></dt><dd>Open files</dd></div>
+              <div><dt><kbd>Ctrl+S</kbd></dt><dd>Convert &amp; save</dd></div>
+              <div><dt><kbd>Ctrl+Shift+S</kbd></dt><dd>Convert all</dd></div>
+              <div><dt><kbd>Delete</kbd></dt><dd>Remove the file from the list</dd></div>
+              <div><dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Previous or next file</dd></div>
+              <div><dt><kbd>Ctrl+PgUp</kbd> <kbd>PgDn</kbd></dt><dd>Previous or next sheet</dd></div>
+              <div><dt><kbd>Ctrl+,</kbd></dt><dd>Settings</dd></div>
+              <div><dt><kbd>Esc</kbd></dt><dd>Close a panel or go back</dd></div>
+              <div><dt><kbd>Ctrl+=</kbd> <kbd>Ctrl+-</kbd></dt><dd>Zoom in or out (<kbd>Ctrl+0</kbd> resets)</dd></div>
+            </dl>
+          </div>
+          <div class="row">
+            <div class="row-text">
+              <div class="label">Report a problem</div>
+              <div class="desc">Opens a new GitHub issue with the app version and error details. Your files are never attached.</div>
+            </div>
+            <button class="btn" id="report-general">
+              <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 14.25V2.25"/><path d="M3.5 2.75h8.25L10 5.75l1.75 3H3.5"/></svg>
+              Report a problem
+            </button>
+          </div>
+          <div class="row">
+            <div class="row-text">
+              <div class="label">Error log</div>
+              <div class="desc">Problems are written to a log on this PC to help with reports. It stays on your computer unless you send it.</div>
+            </div>
+            <button class="btn" id="open-log">
+              <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.75 4.25c0-.69.56-1.25 1.25-1.25h3.1l1.4 1.5H13c.69 0 1.25.56 1.25 1.25v6.25c0 .69-.56 1.25-1.25 1.25H3c-.69 0-1.25-.56-1.25-1.25z"/></svg>
+              Open log folder
+            </button>
+          </div>
+          <div class="row about">
+            <span id="about"></span>
           </div>
         </div>
       </div>
     </section>
   </main>
+
+  <div class="scrim" id="report-dialog" hidden>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="report-title">
+      <div class="dialog-body">
+        <h2 id="report-title">Report a problem</h2>
+        <p class="muted">This opens a new issue on GitHub with the details below, so you can add what you were doing. Your Numbers file is never attached or uploaded.</p>
+        <div class="field-label">Details that will be included</div>
+        <div class="details-box" id="report-details"></div>
+        <p class="small muted">Posting needs a free GitHub account. You can also copy the details and send them another way.</p>
+      </div>
+      <div class="dialog-foot">
+        <button class="btn" id="report-cancel">Cancel</button>
+        <button class="btn" id="report-copy">Copy details</button>
+        <button class="btn primary" id="report-open">
+          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M9.5 2.25h4.25V6.5"/><path d="M13.75 2.25 7.75 8.25"/><path d="M12 9.5v3.25c0 .69-.56 1.25-1.25 1.25h-7.5C2.56 14 2 13.44 2 12.75v-7.5C2 4.56 2.56 4 3.25 4H6.5"/></svg>
+          Open GitHub issue
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden>
+    <svg class="toast-icon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.25"/><path d="M8 7.25V11"/><path d="M8 5h.01"/></svg>
+    <span id="toast-text"></span>
+    <button class="link-btn" id="toast-action" hidden></button>
+    <button class="icon-btn small" id="toast-close" aria-label="Dismiss">
+      <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="m4.25 4.25 7.5 7.5M11.75 4.25l-7.5 7.5"/></svg>
+    </button>
+  </div>
+
+  <div class="drop-overlay" aria-hidden="true">Drop to open</div>
 
   <script src="charts.js"></script>
   <script src="renderer.js"></script>

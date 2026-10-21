@@ -8,12 +8,19 @@ contextBridge.exposeInMainWorld('api', {
 
   pathForFile: (file) => webUtils.getPathForFile(file),
   pickFiles: () => ipcRenderer.invoke('files:pick'),
+  pickPackages: () => ipcRenderer.invoke('files:pickPackages'),
   pickFolder: () => ipcRenderer.invoke('folder:pick'),
   preview: (p, password, layout) => ipcRenderer.invoke('files:preview', p, password, layout),
-  convert: (p, password, layout) => ipcRenderer.invoke('files:convert', p, password, layout),
+  convert: (p, password, layout, options) => ipcRenderer.invoke('files:convert', p, password, layout, options),
+  target: (p) => ipcRenderer.invoke('files:target', p),
   reveal: (p) => ipcRenderer.invoke('files:reveal', p),
   open: (p) => ipcRenderer.invoke('files:open', p),
   onFilesOpened: (cb) => ipcRenderer.on('files:opened', (_e, files) => cb(files)),
+
+  openLink: (url) => ipcRenderer.invoke('link:open', url),
+  openLogFolder: () => ipcRenderer.invoke('log:open'),
+  reportProblem: (details) => ipcRenderer.invoke('report:open', details),
+  copy: (text) => ipcRenderer.invoke('clipboard:write', text),
 
   getUpdateState: () => ipcRenderer.invoke('update:get'),
   checkForUpdates: () => ipcRenderer.invoke('update:check'),

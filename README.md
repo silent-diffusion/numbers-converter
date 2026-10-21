@@ -13,11 +13,20 @@ Convert Apple Numbers (`.numbers`) spreadsheets to Excel (`.xlsx`) on Windows, e
 
 ## Use
 
-- Drag `.numbers` files onto the window, or click **Choose files**. Each file opens in a preview showing its sheets, cells and formatting.
-- Click **Convert & save** to save it as an `.xlsx` next to the original (change the folder in **Settings → General**). Existing files are never overwritten: you get `Budget (1).xlsx` instead.
-- To skip the button, turn on **Settings → General → Convert automatically**. Files are then saved as soon as they're opened.
-- **Sheets with more than one table** (Settings → General): **Separate sheets** (the default) puts each table on an Excel sheet of its own; **One sheet** keeps a Numbers sheet's tables and charts together on one Excel sheet, laid out as in Numbers. The preview has the same switch for the sheet you're looking at, so each sheet can go either way.
+- Drag `.numbers` files onto the window, or click **Choose files** (Ctrl+O). Each file opens in a preview of its sheets, cells, formatting and charts as they'll be in Excel. Files a Mac saved as a *package* (a folder ending in `.numbers`) can be dragged in too, or opened with **Open a Mac package folder**.
+- Before you save, the button beside **Convert & save** says whether the file **converts fully** or how many **changes** to check. It opens **What changes in Excel**, which lists:
+  - formulas that keep their last value, with why and in which cells (**Show** jumps to each one);
+  - things that aren't converted yet, such as text boxes, images and conditional highlighting;
+  - smaller differences, such as Mac fonts Windows doesn't have.
+- Click **Convert & save** (Ctrl+S) to save an `.xlsx` next to the original, or in a folder you choose in Settings. Existing files are never overwritten: you get `Budget (1).xlsx` instead. **Convert all** (Ctrl+Shift+S) saves every file that's ready.
+- **Settings** (the gear at the top right, or Ctrl+,):
+  - **Convert files as soon as they open**, to skip the button.
+  - **Save Excel files**: next to the original, or in a folder you choose.
+  - **Sheets with more than one table**: **Separate sheets** (the default) puts each table on an Excel sheet of its own; **One sheet** keeps a Numbers sheet's tables and charts together on one Excel sheet, laid out as in Numbers. The preview has the same switch for the sheet you're looking at, so each sheet can go either way, and the app remembers your choice for that file.
+  - **Add a Contents sheet**: starts the Excel file with a sheet linking to every table, like the summary sheet Numbers can add when it exports.
 - You can also right-click a `.numbers` file → **Open with → Numbers Converter**.
+- If a file can't be read, the app says why, shows the picture Numbers saves inside every file, and lets you **Try again** or **Report a problem**.
+- Keyboard: Ctrl+O open files · Ctrl+S convert & save · Ctrl+Shift+S convert all · ↑ ↓ previous or next file · Delete remove the file from the list · Ctrl+PgUp / PgDn previous or next sheet · Ctrl+, settings · Esc close a panel or go back · Ctrl+= / Ctrl+- / Ctrl+0 zoom.
 
 ### What carries over
 
@@ -34,23 +43,33 @@ Each Numbers table becomes an Excel sheet (with the table's name in a title row 
 
 - **Charts** — column, bar, stacked, line, area, pie, donut, scatter, radar, 2-axis and mixed charts become real Excel charts that read the converted cells, so they update when the data changes. Each keeps its place beside, above or below its table (rows are added above a table to make room for charts over it, as Apple's own export does), its colours, title, legend, gaps, value labels, axis titles and gridlines. The preview shows them where they'll be. 3D charts come out flat, and interactive charts show all their data sets at once. Bubble charts aren't converted yet; the app tells you when a file has one.
 
-Not carried over yet: **images, shapes and text boxes** (the app tells you when a file has images or shapes), conditional highlighting, and the grouped view of tables with categories (their rows come out in their original order).
+Not carried over yet: **images, shapes and text boxes**, conditional highlighting, and the grouped view of tables with categories (their rows come out in their original order). When a file has any of these, **What changes in Excel** says so before you save.
 
-Password-protected files ask for the password (and show its hint); it's only kept in memory while the app is open.
-Files a Mac saved as a *package* (a folder ending in `.numbers`) can be dragged onto the window.
+Password-protected files ask for the password and show its hint; the password is only kept in memory while the app is open.
 
 ## Updates
 
 **Settings → Updates**
 
-- **Automatic updates** (on by default): checks GitHub Releases at startup and every 6 hours, downloads new versions in the background, and installs them when you close the app or click **Restart to update**.
-- Turn it off to update only when you click **Check for updates**.
+- **Check for updates automatically** (on by default): checks GitHub Releases at startup and every 6 hours, downloads new versions in the background, and installs them the next time you restart. When one is ready, an **Update ready · Restart** button appears at the top of the window.
+- Turn it off and the app never goes online on its own; it only checks when you click **Check for updates**.
 
-Conversion itself never uses the internet; only the update check does.
+## Privacy
+
+Numbers Converter does all of its work on your PC.
+
+- **Your files are never uploaded.** Previews and conversions run in the app's own converter on your computer, with no internet connection needed.
+- **No account, no ads, no tracking.** The app collects no usage data.
+- **The only time it goes online is to check GitHub for updates:** at startup and every 6 hours while automatic updates are on, or when you click **Check for updates**.
+- **Report a problem** opens a new GitHub issue in your browser, filled in with the app version, the Windows version and the error message. File names and contents are left out, and nothing is sent until you post the issue yourself.
+- **Problems are written to a log on your PC** (`%APPDATA%\Numbers Converter\logs`, or **Settings → Help → Open log folder**). It stays there unless you send it to someone.
+- **Passwords** for protected files are kept in memory only, and forgotten when you close the app.
 
 ## Develop
 
-The Numbers reader and Excel writer is a Python helper ([`py/numbers_tool.py`](py/numbers_tool.py), with pivot
+The window is plain HTML, CSS and JavaScript in [`src/renderer`](src/renderer), and the Electron main process is
+[`src/main.js`](src/main.js). The Numbers reader and Excel writer is a Python helper
+([`py/numbers_tool.py`](py/numbers_tool.py), which also works out the "What changes in Excel" report, with pivot
 recalculation in [`py/pivots.py`](py/pivots.py), charts in [`py/charts.py`](py/charts.py) and sheet layout in
 [`py/layout.py`](py/layout.py), built on
 [numbers-parser](https://github.com/masaccio/numbers-parser) and [XlsxWriter](https://xlsxwriter.readthedocs.io/)).

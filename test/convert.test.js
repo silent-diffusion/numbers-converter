@@ -3,7 +3,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { convertFile, previewFile, stopHelper } = require('../src/convert');
+const { convertFile, previewFile, targetPath, stopHelper } = require('../src/convert');
 
 const fixture = (name) => path.join(__dirname, 'fixtures', `${name}.numbers`);
 
@@ -20,7 +20,11 @@ const fixture = (name) => path.join(__dirname, 'fixtures', `${name}.numbers`);
   const [text, styleIdx] = preview.sheets[0].rows[1][0];
   assert.match(text, /^name="Title"/);
   assert.strictEqual(preview.sheets[0].styles[styleIdx].b, 1);
+  // What will be different in Excel comes with the preview, before anything is saved.
+  assert.deepStrictEqual(preview.report.changes, []);
+  assert.ok(preview.report.kept.includes('41 formulas that keep calculating in Excel'));
 
+  assert.strictEqual(targetPath(input), path.join(dir, 'Styles & Formats.xlsx'));
   const first = await convertFile(input);
   assert.ok(first.ok, first.error);
   assert.strictEqual(first.outputPath, path.join(dir, 'Styles & Formats.xlsx'));
@@ -28,10 +32,15 @@ const fixture = (name) => path.join(__dirname, 'fixtures', `${name}.numbers`);
 
   const second = await convertFile(input);
   assert.strictEqual(second.outputPath, path.join(dir, 'Styles & Formats (1).xlsx'), 'must not overwrite existing output');
+  assert.strictEqual(targetPath(input), path.join(dir, 'Styles & Formats (2).xlsx'));
+  // Saving again after a layout change writes over the app's own earlier copy instead of adding another.
+  const again = await convertFile(input, undefined, undefined, undefined, { replace: second.outputPath });
+  assert.strictEqual(again.outputPath, second.outputPath);
 
   const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'numbers-out-'));
-  const elsewhere = await convertFile(input, outDir);
+  const elsewhere = await convertFile(input, outDir, undefined, undefined, { contents: true });
   assert.strictEqual(path.dirname(elsewhere.outputPath), outDir);
+  assert.ok(elsewhere.contents);
 
   // Charts become Excel charts and show in the preview; Excel has no bubble charts, so that one is reported.
   const charts = await previewFile(fixture('issue-9'));
@@ -53,6 +62,7 @@ const fixture = (name) => path.join(__dirname, 'fixtures', `${name}.numbers`);
 
   const locked = await previewFile(fixture('encrypted'));
   assert.ok(!locked.ok && locked.needsPassword && /password/.test(locked.error));
+  assert.strictEqual(locked.hint, 's3cr3t'); // shown from the first prompt
   const wrong = await previewFile(fixture('encrypted'), 'nope');
   assert.ok(!wrong.ok && wrong.needsPassword && wrong.hint === 's3cr3t');
   const unlocked = await previewFile(fixture('encrypted'), 's3cr3t');

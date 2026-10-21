@@ -4,6 +4,7 @@ import datetime as dt
 import os
 import sys
 import tempfile
+import zipfile
 from types import SimpleNamespace
 
 from numbers_parser import Document
@@ -461,8 +462,7 @@ def test_password_protected():
             nt.load(fixture("encrypted"), password)
         except nt.UserError as err:
             assert expected in str(err) and err.extra["needsPassword"]
-            if password:
-                assert err.extra["hint"] == "s3cr3t"  # this sample's hint is its password
+            assert err.extra["hint"] == "s3cr3t"  # shown from the first prompt; this sample's hint is its password
         else:
             raise AssertionError("expected a UserError")
     assert nt.preview(fixture("encrypted"), "s3cr3t")["sheets"]
@@ -538,6 +538,78 @@ def test_hidden_rows_and_columns():
     ws = load_workbook(out).worksheets[0]
     assert ws.row_dimensions[p.row + 2].hidden and ws.column_dimensions["C"].hidden
     nt._cache.clear()
+
+
+def test_formulas_say_why_they_keep_values():
+    def why(formula):
+        reasons = []
+        assert nt.translate_formula(formula, FakeLayout, "Main", why=reasons) is None
+        return reasons[0]
+    assert why('STOCK("AAPL",1)') == "function:STOCK"
+    assert why("IF(A1)") == "arguments:IF"
+    assert why("GCD(5,(A1,A2))") == "list"
+    assert why('DATEDIF("15/05/2001","15/07/2002","D")') == "date-text"
+    assert why('AVERAGEIFS({1,2},{1,0},">0")') == "array"
+    assert why("SUM(Unknown::A1)") == "missing"
+    assert why("SUM(#REF!)") == "broken"
+
+
+def test_change_report():
+    def report(name):
+        return nt.preview(fixture(name))["report"]
+
+    formulas = report("create-formulas")
+    (kept,) = [c for c in formulas["changes"] if c["kind"] == "formulas"]
+    assert kept["title"] == "1 formula keeps its last value" and "#REF!" in kept["detail"]
+    cell = kept["cells"][0]
+    sheet = next(s for s in nt.preview(fixture("create-formulas"))["sheets"] if s["name"] == cell["sheet"])
+    shown = sheet["rows"][cell["row"]][cell["col"]]  # plain text, or [text, style, ...]
+    assert (shown if isinstance(shown, str) else shown[0]) == "#REF!" and cell["ref"] == f"A{cell['row'] + 1}"
+    assert "109 formulas that keep calculating in Excel" in formulas["kept"]
+
+    charts_file = report("issue-9")
+    kinds = {c["kind"]: c for c in charts_file["changes"]}
+    assert kinds["shapes"]["title"].startswith("7 text boxes")  # text boxes were missed before
+    assert "Bubble charts" in kinds["charts"]["detail"]
+    assert any(n["kind"] == "interactive" for n in charts_file["notes"])
+
+    assert any(c["kind"] == "highlighting" for c in report("issue-66-collab")["changes"])
+    custom = {c["kind"]: c for c in report("test-custom-formats")["changes"]}
+    assert "DURATION" in custom["formulas"]["detail"] and custom["formats"]["title"].endswith("custom number format")
+    assert any(n["kind"] == "pivot-values" for n in report("test-pivot")["notes"])
+    fonts = next(n for n in report("test-styles")["notes"] if n["kind"] == "fonts")
+    assert "Helvetica Neue → Arial" in fonts["detail"]
+    assert not report("test-styles")["changes"]
+
+
+def test_unreadable_files_show_their_picture():
+    bad = os.path.join(OUT, "Damaged.numbers")
+    with zipfile.ZipFile(fixture("test-styles")) as zin, zipfile.ZipFile(bad, "w") as zout:
+        for item in zin.infolist():
+            zout.writestr(item, b"\x00broken" * 40 if item.filename.endswith("Document.iwa") else zin.read(item.filename))
+    try:
+        nt.load(bad)
+    except nt.UserError as err:
+        assert err.extra["reason"] == "unreadable" and err.extra["picture"].startswith("data:image/jpeg;base64,")
+        assert "Damaged" not in err.extra["details"] and OUT not in err.extra["details"]
+    else:
+        raise AssertionError("expected a UserError")
+    assert nt.technical(OSError(f"can't open {bad}"), bad) == "OSError: can't open <file>"
+
+
+def test_contents_sheet():
+    out = os.path.join(OUT, "contents.xlsx")
+    result = nt.convert(fixture("create-formulas"), out, layout_options={"default": "sheet"}, contents=True)
+    wb = load_workbook(out)
+    assert result["contents"] and wb.sheetnames == ["Contents", "Main Sheet", "Powers Sheet"]
+    ws = wb["Contents"]
+    links = [row[2] for row in ws.iter_rows(min_row=5) if row[2].hyperlink]
+    assert len(links) == 14 and all(link.hyperlink.location.startswith("'") for link in links)
+    target = links[0].hyperlink.location  # e.g. 'Main Sheet'!H42: the table's top-left cell
+    sheet, cell = target.split("!")
+    assert wb[sheet.strip("'")][cell].value is not None
+    plain = nt.convert(fixture("create-formulas"), os.path.join(OUT, "no-contents.xlsx"))
+    assert not plain["contents"] and "Contents" not in load_workbook(os.path.join(OUT, "no-contents.xlsx")).sheetnames
 
 
 if __name__ == "__main__":
