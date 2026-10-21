@@ -15,9 +15,12 @@ import re
 import sys
 import warnings
 from collections import OrderedDict
+from decimal import ROUND_HALF_UP, Decimal
 
 import xlsxwriter
 from numbers_parser import Document
+
+import pivots
 from numbers_parser.cell import (
     RGB,
     BoolCell,
@@ -192,6 +195,18 @@ class Book:
             self.by_table.setdefault((None, table.name), excel_name)
             self.by_sheet.setdefault(sheet_name, excel_name)
         self.unsupported = count_drawables(doc)
+        # Pivot tables whose summary values have to be recalculated: {table_id: {(row, col): (value, source cell)}}
+        self.pivot_values = {}
+        for _, _, table in self.tables:
+            try:
+                pivot = pivots.pivot_for(table)
+            except Exception:  # pivots.Unsupported, or a pivot laid out in a way we don't recognise
+                self.unsupported["pivots"] += 1
+                continue
+            if pivot is not None:
+                self.pivot_values[table._table_id] = pivot.values
+                if pivot.missing:
+                    self.unsupported["pivots"] += 1
 
 
 def stored_sizes(table, columns):
@@ -234,12 +249,9 @@ def count_drawables(doc):
     kinds = {"ChartDrawableArchive": "charts", "ImageArchive": "images", "MovieArchive": "images", "ShapeArchive": "shapes"}
     try:
         for obj in doc._model.objects._objects.values():
-            name = type(obj).__name__
-            kind = kinds.get(name)
+            kind = kinds.get(type(obj).__name__)
             if kind:
                 counts[kind] += 1
-            elif name == "TableInfoArchive" and obj.is_a_pivot_table:
-                counts["pivots"] += 1  # pivot summaries can't be read; those cells come out blank
     except Exception:
         pass
     return counts
@@ -405,6 +417,7 @@ def preview(path):
         rows_shown = min(table.num_rows, PREVIEW_MAX_ROWS)
         cols_shown = min(table.num_cols, PREVIEW_MAX_COLS)
         styles, style_ids = [{}], {"{}": 0}  # index 0 = unstyled; such cells are sent as plain strings
+        computed = book.pivot_values.get(table._table_id, {})
         rows = []
         for r in range(rows_shown):
             row = []
@@ -414,13 +427,17 @@ def preview(path):
                     row.append(None)
                     continue
                 st = cell_style(cell)
-                if is_numeric(cell) and "ha" not in st:
+                if (is_numeric(cell) or (r, c) in computed) and "ha" not in st:
                     st["ha"] = "right"
                 key = json.dumps(st, sort_keys=True)
                 if key not in style_ids:
                     style_ids[key] = len(styles)
                     styles.append(st)
-                text = "" if isinstance(cell, EmptyCell) else formatted(cell)
+                if (r, c) in computed:
+                    value, source = computed[(r, c)]
+                    text = format_number(value, source and excel_number_format(source))
+                else:
+                    text = "" if isinstance(cell, EmptyCell) else formatted(cell)
                 row.append([text, style_ids[key]] if style_ids[key] else text)
             rows.append(row)
 
@@ -443,6 +460,26 @@ def preview(path):
             "totalCols": table.num_cols,
         })
     return {"sheets": sheets, "unsupported": book.unsupported}
+
+
+def format_number(value, code):
+    """Preview text for a computed number using the simple Excel format codes this tool writes."""
+    if value is None:
+        return ""
+    head = (code or "").split(";")[0]  # positive-number section
+    if "%" in head:
+        value *= 100
+    sep = "," if "," in head else ""
+    decimals = re.search(r"\.(0+)", head)
+    if head:
+        places = len(decimals.group(1)) if decimals else 0
+        # Excel rounds halves away from zero; Python's format() rounds them to even.
+        rounded = Decimal(repr(abs(value))).quantize(Decimal(1).scaleb(-places), ROUND_HALF_UP)
+        digits = f"{rounded:{sep}f}"
+    else:  # General
+        digits = f"{abs(value):{sep}.10g}"
+    symbol = re.search(r'"([^"]*)"', head)
+    return ("-" if value < 0 else "") + (symbol.group(1) if symbol else "") + digits + ("%" if "%" in head else "")
 
 
 def parse_range(rng):
@@ -755,11 +792,20 @@ def convert(path, out):
             r1, c1, r2, c2 = parse_range(rng)
             merged_anchors[(r1, c1)] = (r2, c2)
 
+        computed = book.pivot_values.get(table._table_id, {})
         for r, row in enumerate(table.iter_rows()):
             for c, cell in enumerate(row):
                 if isinstance(cell, MergedCell):
                     continue
                 style = cell_style(cell)
+                if (r, c) in computed:  # recalculated pivot summary
+                    value, source = computed[(r, c)]
+                    fmt = formats.get(style, source and excel_number_format(source))
+                    if value is None:
+                        ws.write_blank(r, c, None, fmt)
+                    else:
+                        ws.write_number(r, c, value, fmt)
+                    continue
                 num_format = excel_number_format(cell)
                 fmt = formats.get(style, num_format)
                 if (r, c) in merged_anchors:

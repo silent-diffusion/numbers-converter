@@ -1,7 +1,7 @@
 {
   "name": "numbers-converter",
   "productName": "Numbers Converter",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "description": "Convert Apple Numbers files to Excel, offline.",
   "main": "src/main.js",
   "scripts": {

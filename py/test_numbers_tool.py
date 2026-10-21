@@ -1,13 +1,18 @@
 """Tests for numbers_tool.py, run with: .venv/Scripts/python py/test_numbers_tool.py"""
 
+import datetime as dt
 import os
 import sys
 import tempfile
 
+from numbers_parser import Document
+from numbers_parser.formula import FUNCTION_NAME_TO_ID
+from numbers_parser.generated import TSCEArchives_pb2 as TSCE
 from openpyxl import load_workbook
 
 sys.path.insert(0, os.path.dirname(__file__))
 import numbers_tool as nt  # noqa: E402
+import pivots  # noqa: E402
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "..", "test", "fixtures")
 OUT = tempfile.mkdtemp(prefix="numbers-tool-")
@@ -127,11 +132,99 @@ def test_text_is_never_invisible():
                     assert not nt.is_light(s.get("bg", "#FFFFFF")), (name, sheet["name"], s)
 
 
-def test_pivot_tables_are_reported():
+def test_pivot_values_match_numbers():
+    # This file was saved by a Numbers version that also stored the pivot results, so the
+    # recalculation can be checked against Numbers' own numbers.
+    doc = Document(fixture("test-pivot"))
+    checked = 0
+    for sheet in doc.sheets:
+        for table in sheet.tables:
+            pivot = pivots.pivot_for(table, recompute_stored=True)
+            if pivot is None:
+                continue
+            assert pivot.missing == 0
+            for (r, c), (value, _) in pivot.values.items():
+                assert abs(table.cell(r, c).value - value) < 1e-6, (sheet.name, r, c)
+                checked += 1
+    assert checked == 28
+
+
+def test_pivot_tables_convert():
     result, wb = convert("test-pivot")
-    assert result["unsupported"]["pivots"] == 2
+    assert result["unsupported"]["pivots"] == 0
     formulas = [c.value for ws in wb.worksheets for row in ws.iter_rows() for c in row if isinstance(c.value, str) and c.value.startswith("=")]
     assert "=" not in formulas  # undecodable pivot formulas must not become empty formulas
+    assert wb["Sales - Sales Pivot"]["B3"].value == 18400
+
+
+def rpn(*tokens):
+    """Build a grouping-formula node list: numbers, strings, 'x', 'FUNC/n', operators, '{' and '}' for thunks."""
+    nodes = []
+    for tok in tokens:
+        n = TSCE.ASTNodeArrayArchive.ASTNodeArchive()
+        if isinstance(tok, (int, float)):
+            n.AST_node_type, n.AST_number_node_number = pivots.NODE.Value("NUMBER_NODE"), tok
+        elif tok == "x":
+            n.AST_node_type, n.AST_symbol = pivots.NODE.Value("VAR_NODE"), 0
+        elif tok in ("{", "}"):
+            n.AST_node_type = pivots.NODE.Value("BEGIN_THUNK_NODE" if tok == "{" else "END_THUNK_NODE")
+        elif "/" in tok and tok.split("/")[0].isupper():
+            name, argc = tok.split("/")
+            n.AST_node_type = pivots.NODE.Value("FUNCTION_NODE")
+            n.AST_function_node_index = FUNCTION_NAME_TO_ID[name]
+            n.AST_function_node_numArgs = int(argc)
+        elif tok in ("+", "-", "*", "/", "="):
+            names = {"+": "ADDITION", "-": "SUBTRACTION", "*": "MULTIPLICATION", "/": "DIVISION", "=": "EQUAL_TO"}
+            n.AST_node_type = pivots.NODE.Value(names[tok] + "_NODE")
+        else:
+            n.AST_node_type, n.AST_string_node_string = pivots.NODE.Value("STRING_NODE"), tok
+        nodes.append(n)
+    return nodes
+
+
+def test_pivot_grouping_formulas():
+    d = dt.datetime(2021, 3, 17, 14, 30)
+    # Numbers' own "by month" rule: IF(AND(SUM(x)=x, NOT(ISBLANK(x))), DATE(2020, MONTH(x), 1), 1/0)
+    month = rpn("x", "SUM/1", "x", "=", "x", "ISBLANK/1", "NOT/1", "AND/2",
+                "{", 2020, "x", "MONTH/1", 1, "DATE/3", "}", "{", 1, 0, "/", "}", "IF/3")
+    assert pivots.evaluate(month, d) == dt.datetime(2020, 3, 1)
+    for bad in (None, "text"):
+        try:
+            pivots.evaluate(month, bad)
+        except pivots.GroupError:
+            pass
+        else:
+            raise AssertionError(bad)
+    quarter = rpn("Q", "x", "MONTH/1", 2, "+", 3, "/", "INT/1", "CONCATENATE/2")
+    assert pivots.evaluate(quarter, d) == "Q1"
+    assert pivots.evaluate(rpn("x", "YEAR/1"), d) == 2021
+    assert pivots.evaluate(rpn("x", "WEEKDAY/1"), d) == 4  # Wednesday, Sunday = 1
+    assert pivots.evaluate(rpn("x", 2, "WEEKDAY/2"), d) == 3  # Monday = 1
+    assert pivots.evaluate(rpn("x", "WEEKNUM/1"), dt.datetime(2021, 1, 2)) == 1
+    assert pivots.evaluate(rpn("x", "WEEKNUM/1"), dt.datetime(2021, 1, 3)) == 2  # first Sunday starts week 2
+    assert pivots.evaluate(rpn("x", 10, "FLOOR/2"), 37) == 30
+    try:
+        pivots.evaluate(rpn("x", "STOCK/1"), d)
+    except pivots.Unsupported:
+        pass
+    else:
+        raise AssertionError("unknown functions must not be guessed")
+
+
+def test_pivot_aggregates():
+    values = [3, None, 5.5, "n/a", 1.5]
+    assert pivots.aggregate("sum", values) == 10
+    assert pivots.aggregate("average", values) == 10 / 3
+    assert pivots.aggregate("count", values) == 4
+    assert pivots.aggregate("min", values) == 1.5 and pivots.aggregate("max", values) == 5.5
+    assert pivots.aggregate("sum", [None, "x"]) is None
+
+
+def test_format_number():
+    assert nt.format_number(1234.5, '"$"#,##0') == "$1,235"
+    assert nt.format_number(-5, '"$"#,##0.00') == "-$5.00"
+    assert nt.format_number(0.256, "0.0%") == "25.6%"
+    assert nt.format_number(476.0, None) == "476"
 
 
 def test_charts_are_reported():

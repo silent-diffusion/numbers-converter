@@ -196,7 +196,7 @@ function renderPreview(f) {
   }
   const missing = describeUnsupported(f.preview.unsupported);
   if (missing) {
-    const pivotNote = f.preview.unsupported?.pivots ? ' Pivot tables keep their labels, but their totals come out blank.' : '';
+    const pivotNote = f.preview.unsupported?.pivots ? ' Those pivot tables keep their labels, but their totals come out blank.' : '';
     notes.push(`This file has ${missing}, which can't be converted. Tables, formatting and formulas are kept.${pivotNote}`);
   }
   if (f.formulasAsValues) {
