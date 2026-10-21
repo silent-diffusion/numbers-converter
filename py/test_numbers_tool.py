@@ -108,6 +108,32 @@ def test_preview():
     assert sheet["styles"][style]["b"] == 1 and sheet["styles"][style]["size"] == 24
 
 
+def test_theme_styles_follow_table_regions():
+    # Cells styled only by the table theme must take the header/body/header-column style of
+    # where they are, not whichever theme-styled cell happened to be read first.
+    sheet = nt.preview(fixture("test-pivot"))["sheets"][0]
+    style = lambda r, c: sheet["styles"][sheet["rows"][r][c][1]] if isinstance(sheet["rows"][r][c], list) else {}  # noqa: E731
+    assert style(0, 1).get("bg") == "#BEC0BF"  # header row
+    assert style(1, 0).get("bg") == "#DCDCDC"  # header column
+    assert "bg" not in style(1, 1)  # body
+
+
+def test_text_is_never_invisible():
+    # Light text only on a dark background, in every fixture.
+    for name in [f[:-8] for f in os.listdir(FIXTURES) if f.endswith(".numbers") and f != "encrypted.numbers"]:
+        for sheet in nt.preview(fixture(name))["sheets"]:
+            for s in sheet["styles"]:
+                if "color" in s and nt.is_light(s["color"]):
+                    assert not nt.is_light(s.get("bg", "#FFFFFF")), (name, sheet["name"], s)
+
+
+def test_pivot_tables_are_reported():
+    result, wb = convert("test-pivot")
+    assert result["unsupported"]["pivots"] == 2
+    formulas = [c.value for ws in wb.worksheets for row in ws.iter_rows() for c in row if isinstance(c.value, str) and c.value.startswith("=")]
+    assert "=" not in formulas  # undecodable pivot formulas must not become empty formulas
+
+
 def test_charts_are_reported():
     data = nt.preview(fixture("issue-9"))
     assert data["unsupported"]["charts"] == 11

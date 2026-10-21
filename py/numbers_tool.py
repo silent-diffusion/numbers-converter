@@ -19,6 +19,7 @@ from collections import OrderedDict
 import xlsxwriter
 from numbers_parser import Document
 from numbers_parser.cell import (
+    RGB,
     BoolCell,
     DateCell,
     DurationCell,
@@ -229,13 +230,16 @@ def unique_sheet_name(name, used):
 
 
 def count_drawables(doc):
-    counts = {"charts": 0, "images": 0, "shapes": 0}
+    counts = {"charts": 0, "images": 0, "shapes": 0, "pivots": 0}
     kinds = {"ChartDrawableArchive": "charts", "ImageArchive": "images", "MovieArchive": "images", "ShapeArchive": "shapes"}
     try:
         for obj in doc._model.objects._objects.values():
-            kind = kinds.get(type(obj).__name__)
+            name = type(obj).__name__
+            kind = kinds.get(name)
             if kind:
                 counts[kind] += 1
+            elif name == "TableInfoArchive" and obj.is_a_pivot_table:
+                counts["pivots"] += 1  # pivot summaries can't be read; those cells come out blank
     except Exception:
         pass
     return counts
@@ -273,12 +277,61 @@ def font_name(name):
 _style_cache = {}
 
 
+def table_region(cell):
+    """Which part of the table's theme styles a cell: header row, header column, footer or body
+    (same precedence as numbers-parser), plus whether it's a shaded band in a banded table."""
+    tm = cell._model.objects[cell._table_id]
+    if cell.row < tm.number_of_header_rows:
+        return "header_row", False
+    if cell.col < tm.number_of_header_columns:
+        return "header_column", False
+    if tm.number_of_footer_rows and cell.row >= tm.number_of_rows - tm.number_of_footer_rows:
+        return "footer_row", False
+    return "body", (cell.row - tm.number_of_header_rows) % 2 == 1
+
+
+def theme_fill(cell, region, banded):
+    """Background colour a cell gets from its table's theme rather than from its own style."""
+    try:
+        model = cell._model
+        tm = model.objects[cell._table_id]
+        if region == "body" and banded:
+            props = model.objects[tm.table_style.identifier].table_properties
+            if props.banded_rows and props.banded_fill.HasField("color"):
+                return rgb_hex(rgb_from_proto(props.banded_fill.color))
+        fill = model.objects[getattr(tm, f"{region}_style" if region != "body" else "body_cell_style").identifier]
+        fill = fill.cell_properties.cell_fill
+        if fill.HasField("color"):
+            return rgb_hex(rgb_from_proto(fill.color))
+    except Exception:
+        pass
+    return None
+
+
+def is_light(hex_color):
+    r, g, b = (int(hex_color[i:i + 2], 16) for i in (1, 3, 5))
+    return 0.299 * r + 0.587 * g + 0.114 * b > 200
+
+
+def rgb_from_proto(color):
+    return RGB(round(color.r * 255), round(color.g * 255), round(color.b * 255))
+
+
 def cell_style(cell):
     """Style dict shared by the preview (as CSS-ish values) and the Excel writer."""
-    key = (id(cell._model), cell._table_id, cell._cell_style_id, cell._text_style_id)
+    # Cells without their own styles take them from the table theme, which differs by region.
+    region, banded = table_region(cell)
+    key = (id(cell._model), cell._table_id, cell._cell_style_id, cell._text_style_id, region, banded)
     s = _style_cache.get(key)
     if s is None:
-        s = _style_cache[key] = text_and_fill_style(cell)
+        s = text_and_fill_style(cell)
+        if "bg" not in s:
+            bg = theme_fill(cell, region, banded)
+            if bg and bg != "#FFFFFF":
+                s["bg"] = bg
+        if "color" in s and is_light(s["color"]) and is_light(s.get("bg", "#FFFFFF")):
+            del s["color"]  # light text we couldn't find the dark background for: keep it readable
+        _style_cache[key] = s
     s = dict(s)
     s.update(border_style(cell))
     return s
@@ -554,6 +607,8 @@ OPERATOR_MAP = {"÷": "/", "×": "*", "≠": "<>", "≤": "<=", "≥": ">="}
 
 def translate_formula(formula, book, sheet_name):
     """Numbers formula text -> Excel formula, or None if it can't be represented safely."""
+    if not formula or not formula.strip():
+        return None  # e.g. pivot table summaries, which numbers-parser can't decode
     out = []
     # One frame per open parenthesis: [function name or None, commas seen, any argument text seen].
     stack = []
@@ -733,19 +788,21 @@ def cached_value(cell):
 
 def write_cell(ws, r, c, cell, fmt, book, sheet_name, stats):
     if cell.is_formula:
-        excel = None
-        # Numbers returns durations from date maths where Excel returns plain numbers (e.g. NETWORKDAYS),
-        # which the duration format would then show as hours, so those keep their values.
-        if not isinstance(cell, DurationCell):
-            try:
-                excel = translate_formula(cell.formula, book, sheet_name)
-            except Exception:
-                pass
+        excel = formula = None
+        try:
+            formula = cell.formula
+            # Numbers returns durations from date maths where Excel returns plain numbers (e.g. NETWORKDAYS),
+            # which the duration format would then show as hours, so those keep their values.
+            if not isinstance(cell, DurationCell):
+                excel = translate_formula(formula, book, sheet_name)
+        except Exception:
+            pass
         if excel:
             stats["formulas"] += 1
             ws.write_formula(r, c, excel, fmt, cached_value(cell))
             return
-        stats["formulasAsValues"] += 1
+        if formula and formula.strip():  # pivot summaries have no readable formula or value; they're reported separately
+            stats["formulasAsValues"] += 1
 
     value = cell.value
     if isinstance(cell, EmptyCell) or value is None:

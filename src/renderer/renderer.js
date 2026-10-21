@@ -195,7 +195,10 @@ function renderPreview(f) {
     notes.push(`Preview shows the first ${shownRows.toLocaleString()} of ${sheet.totalRows.toLocaleString()} rows and ${shownCols} of ${sheet.totalCols} columns. The saved file includes everything.`);
   }
   const missing = describeUnsupported(f.preview.unsupported);
-  if (missing) notes.push(`This file has ${missing}, which can't be converted. Tables, formatting and formulas are kept.`);
+  if (missing) {
+    const pivotNote = f.preview.unsupported?.pivots ? ' Pivot tables keep their labels, but their totals come out blank.' : '';
+    notes.push(`This file has ${missing}, which can't be converted. Tables, formatting and formulas are kept.${pivotNote}`);
+  }
   if (f.formulasAsValues) {
     notes.push(`${f.formulasAsValues} formula${f.formulasAsValues === 1 ? '' : 's'} used Numbers-only features and ${f.formulasAsValues === 1 ? 'was' : 'were'} saved as ${f.formulasAsValues === 1 ? 'its value' : 'values'}.`);
   }
@@ -209,6 +212,7 @@ function describeUnsupported(u = {}) {
   add(u.charts, 'chart', 'charts');
   add(u.images, 'image', 'images');
   add(u.shapes, 'shape', 'shapes');
+  add(u.pivots, 'pivot table', 'pivot tables');
   if (!parts.length) return '';
   return parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`;
 }
