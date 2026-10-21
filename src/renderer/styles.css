@@ -171,7 +171,7 @@ li.error .status-icon, li.error .file-meta { color: var(--danger); }
 .preview-title { min-width: 0; }
 .preview-title .file-name { font-weight: 600; font-size: 15px; }
 .preview-head .file-meta.done { color: var(--accent); }
-.sheet-tabs { display: flex; gap: 4px; padding: 8px 10px 0; border-bottom: 1px solid var(--border); overflow-x: auto; overflow-y: hidden; flex-shrink: 0; }
+.sheet-tabs { display: flex; gap: 4px; padding: 8px 10px 0; border-bottom: 1px solid var(--border); overflow-x: auto; overflow-y: hidden; flex-shrink: 0; scrollbar-width: none; }
 .sheet-tabs:empty { display: none; }
 .sheet-tab {
   padding: 5px 12px; border: 1px solid transparent; border-bottom: 0;
@@ -181,28 +181,32 @@ li.error .status-icon, li.error .file-meta { color: var(--danger); }
 .sheet-tab:hover { color: var(--text); }
 .sheet-tab.active { color: var(--text); background: var(--surface); border-color: var(--border); font-weight: 600; }
 
-.grid-wrap { flex: 1; min-height: 0; overflow: auto; user-select: text; }
-.grid-message { height: 100%; display: grid; place-items: center; padding: 24px; color: var(--muted); text-align: center; }
+/* The sheet itself always renders like paper (as in Numbers/Excel) so file colours look right in dark mode. */
+.grid-wrap { flex: 1; min-height: 0; overflow: auto; user-select: text; background: #fff; }
+.grid-message { height: 100%; display: grid; place-items: center; padding: 24px; color: var(--muted); text-align: center; background: var(--surface); }
 .grid-message.error { color: var(--danger); }
-.grid { border-collapse: separate; border-spacing: 0; font-size: 13px; font-variant-numeric: tabular-nums; }
-.grid th, .grid td {
-  padding: 4px 10px; height: 26px;
-  border-right: 1px solid var(--border); border-bottom: 1px solid var(--border);
-  white-space: nowrap; max-width: 320px; overflow: hidden; text-overflow: ellipsis;
+.grid {
+  table-layout: fixed; width: max-content;
+  border-collapse: collapse;
+  color: #000; font: 13.3px/1.25 "Helvetica Neue", Arial, sans-serif; font-variant-numeric: tabular-nums;
 }
-.grid td.num { text-align: right; }
-.grid thead th {
-  position: sticky; top: 0; z-index: 1;
-  background: var(--bg); color: var(--muted); font-weight: 500; font-size: 12px; text-align: center;
-  min-width: 48px;
+.grid col.rowhead-col { width: 40px; }
+.grid td {
+  padding: 2px 5px;
+  border: 1px solid #e3e3e3;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  vertical-align: middle;
 }
-.grid tbody th {
-  position: sticky; left: 0;
-  background: var(--bg); color: var(--muted); font-weight: 500; font-size: 12px; text-align: right;
-  min-width: 40px;
+.grid th {
+  padding: 2px 4px;
+  background: #f3f3f4; color: #6b6b73;
+  border: 1px solid #dcdcdf;
+  font: 500 11px "Segoe UI", system-ui, sans-serif;
 }
-.grid thead th.corner { left: 0; z-index: 2; }
-.preview-note { padding: 6px 14px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+.grid thead th { position: sticky; top: 0; z-index: 2; height: 22px; text-align: center; }
+.grid tbody th { position: sticky; left: 0; z-index: 1; text-align: right; }
+.grid thead th.corner { left: 0; z-index: 3; }
+.preview-note { padding: 6px 14px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; display: grid; gap: 2px; }
 .preview-note[hidden] { display: none; }
 .spinner {
   width: 14px; height: 14px; border-radius: 50%;

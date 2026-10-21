@@ -1,13 +1,14 @@
 {
   "name": "numbers-converter",
   "productName": "Numbers Converter",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Convert Apple Numbers files to Excel, offline.",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node test/convert.test.js",
-    "dist": "electron-builder --win --publish never"
+    "test": ".venv\\Scripts\\python -W ignore py/test_numbers_tool.py && node test/convert.test.js",
+    "build:helper": ".venv\\Scripts\\pyinstaller --noconfirm --onedir --name numbers-tool --distpath py/dist --workpath py/build --specpath py/build --collect-submodules numbers_parser --collect-data numbers_parser --exclude-module numpy --exclude-module openpyxl --exclude-module tkinter py/numbers_tool.py",
+    "dist": "npm run build:helper && electron-builder --win --publish never"
   },
   "repository": {
     "type": "git",
@@ -16,8 +17,7 @@
   "author": "silent-diffusion",
   "license": "MIT",
   "dependencies": {
-    "electron-updater": "^6.8.9",
-    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+    "electron-updater": "^6.8.9"
   },
   "devDependencies": {
     "electron": "^44.9.3",
@@ -37,6 +37,12 @@
     "files": [
       "src/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "py/dist/numbers-tool",
+        "to": "numbers-tool"
+      }
     ],
     "fileAssociations": [
       {

@@ -83,6 +83,7 @@ async function convert(f) {
   if (res.ok) {
     f.status = 'done';
     f.output = res.outputPath;
+    f.formulasAsValues = res.formulasAsValues;
   } else {
     f.status = 'error';
     f.error = res.error;
@@ -182,17 +183,34 @@ function renderPreview(f) {
   const sheet = sheets[f.sheet];
   if (!sheet.rows.length) {
     grid.replaceChildren(el('div', 'grid-message', 'This sheet is empty.'));
-    return;
+  } else {
+    grid.replaceChildren(buildTable(sheet));
+    grid.scrollTo(0, 0);
   }
-  grid.replaceChildren(buildTable(sheet));
-  grid.scrollTo(0, 0);
 
+  const notes = [];
   const shownRows = sheet.rows.length;
-  const shownCols = sheet.rows[0].length;
+  const shownCols = sheet.rows[0]?.length || 0;
   if (shownRows < sheet.totalRows || shownCols < sheet.totalCols) {
-    note.hidden = false;
-    note.textContent = `Preview shows the first ${shownRows.toLocaleString()} of ${sheet.totalRows.toLocaleString()} rows and ${shownCols} of ${sheet.totalCols} columns. The saved file includes everything.`;
+    notes.push(`Preview shows the first ${shownRows.toLocaleString()} of ${sheet.totalRows.toLocaleString()} rows and ${shownCols} of ${sheet.totalCols} columns. The saved file includes everything.`);
   }
+  const missing = describeUnsupported(f.preview.unsupported);
+  if (missing) notes.push(`This file has ${missing}, which can't be converted. Tables, formatting and formulas are kept.`);
+  if (f.formulasAsValues) {
+    notes.push(`${f.formulasAsValues} formula${f.formulasAsValues === 1 ? '' : 's'} used Numbers-only features and ${f.formulasAsValues === 1 ? 'was' : 'were'} saved as ${f.formulasAsValues === 1 ? 'its value' : 'values'}.`);
+  }
+  note.hidden = !notes.length;
+  note.replaceChildren(...notes.map((n) => el('div', null, n)));
+}
+
+function describeUnsupported(u = {}) {
+  const parts = [];
+  const add = (n, one, many) => { if (n) parts.push(`${n} ${n === 1 ? one : many}`); };
+  add(u.charts, 'chart', 'charts');
+  add(u.images, 'image', 'images');
+  add(u.shapes, 'shape', 'shapes');
+  if (!parts.length) return '';
+  return parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}`;
 }
 
 function columnName(i) {
@@ -201,22 +219,63 @@ function columnName(i) {
   return s;
 }
 
+const PT_TO_PX = 4 / 3;
+const BORDER_STYLES = { solid: 'solid', dashes: 'dashed', dots: 'dotted' };
+
+// Apply a cell style from the helper (see cell_style in py/numbers_tool.py) as inline CSS.
+function applyStyle(td, s) {
+  if (!s) return;
+  const st = td.style;
+  if (s.b) st.fontWeight = '600';
+  if (s.i) st.fontStyle = 'italic';
+  const deco = [s.u && 'underline', s.st && 'line-through'].filter(Boolean).join(' ');
+  if (deco) st.textDecoration = deco;
+  if (s.color) st.color = s.color;
+  if (s.bg) st.background = s.bg;
+  if (s.size) st.fontSize = `${s.size * PT_TO_PX}px`;
+  if (s.font) st.fontFamily = `"${s.font}", Arial, sans-serif`;
+  if (s.ha) st.textAlign = s.ha;
+  if (s.va) st.verticalAlign = s.va;
+  if (s.wrap) { st.whiteSpace = 'pre-wrap'; st.wordBreak = 'break-word'; }
+  for (const [key, side] of [['bt', 'Top'], ['br', 'Right'], ['bb', 'Bottom'], ['bl', 'Left']]) {
+    if (!s[key]) continue;
+    const [width, color, kind] = s[key];
+    st[`border${side}`] = `${Math.max(1, Math.round(width * PT_TO_PX))}px ${BORDER_STYLES[kind] || 'solid'} ${color}`;
+  }
+}
+
 function buildTable(sheet) {
   const table = el('table', 'grid');
+  const cols = el('colgroup');
+  cols.append(el('col', 'rowhead-col'));
+  sheet.colWidths.forEach((w) => {
+    const col = el('col');
+    col.style.width = `${w}px`;
+    cols.append(col);
+  });
+  table.append(cols);
+
   const headRow = el('tr');
   headRow.append(el('th', 'corner'));
-  sheet.rows[0].forEach((_, c) => headRow.append(el('th', null, columnName(sheet.startCol + c))));
+  sheet.colWidths.forEach((_, c) => headRow.append(el('th', null, columnName(c))));
   const head = el('thead');
   head.append(headRow);
   table.append(head);
 
+  const spans = new Map(sheet.merges.map(([r1, c1, r2, c2]) => [`${r1},${c1}`, [r2 - r1 + 1, c2 - c1 + 1]]));
   const body = el('tbody');
   sheet.rows.forEach((row, r) => {
     const tr = el('tr');
-    tr.append(el('th', null, String(sheet.startRow + r + 1)));
-    row.forEach((value, c) => {
-      const td = el('td', sheet.numeric[r][c] ? 'num' : null, value);
-      if (value.length > 40) td.title = value;
+    tr.style.height = `${sheet.rowHeights[r]}px`;
+    tr.append(el('th', null, String(r + 1)));
+    row.forEach((cell, c) => {
+      if (cell === null) return; // covered by a merged cell
+      const [text, styleIdx] = typeof cell === 'string' ? [cell, 0] : cell;
+      const td = el('td', null, text);
+      applyStyle(td, sheet.styles[styleIdx]);
+      const span = spans.get(`${r},${c}`);
+      if (span) { td.rowSpan = span[0]; td.colSpan = span[1]; }
+      if (text.length > 40) td.title = text;
       tr.append(td);
     });
     body.append(tr);

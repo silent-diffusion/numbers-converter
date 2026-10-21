@@ -1,45 +1,56 @@
-// Round-trip test: build a .numbers file with SheetJS, convert it, read the .xlsx back.
+// Exercises the Node <-> Python helper bridge with real Numbers files.
 const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const XLSX = require('xlsx');
-const { convertFile, previewFile } = require('../src/convert');
+const { convertFile, previewFile, stopHelper } = require('../src/convert');
 
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'numbers-converter-'));
-const input = path.join(dir, 'Budget.numbers');
+const fixture = (name) => path.join(__dirname, 'fixtures', `${name}.numbers`);
 
-const rows = [
-  ['Item', 'Amount', 'Paid'],
-  ['Rent', 1200, true],
-  ['Groceries', 342.5, false],
-  ['Internet', 60, true]
-];
-const wb = XLSX.utils.book_new();
-XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), 'Expenses');
-// SheetJS needs its Numbers template payload to write .numbers files.
-XLSX.writeFile(wb, input, { bookType: 'numbers', numbers: require('xlsx/dist/xlsx.zahl') });
+(async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'numbers-converter-'));
+  const input = path.join(dir, 'Styles & Formats.numbers');
+  fs.copyFileSync(fixture('test-styles'), input);
 
-const preview = previewFile(input);
-assert.strictEqual(preview.sheets.length, 1);
-assert.strictEqual(preview.sheets[0].totalRows, 4);
-assert.deepStrictEqual(preview.sheets[0].rows[0], ['Item', 'Amount', 'Paid']);
-assert.strictEqual(preview.sheets[0].rows[2][1], '342.5');
-assert.deepStrictEqual(preview.sheets[0].numeric[1], [false, true, false]);
+  const preview = await previewFile(input);
+  assert.ok(preview.ok, preview.error);
+  assert.deepStrictEqual(preview.sheets.map((s) => s.name), ['Styles', 'Headers', 'Borders', 'Large Borders']);
+  const [text, styleIdx] = preview.sheets[0].rows[0][0];
+  assert.match(text, /^name="Title"/);
+  assert.strictEqual(preview.sheets[0].styles[styleIdx].b, 1);
 
-const first = convertFile(input);
-assert.strictEqual(first.outputPath, path.join(dir, 'Budget.xlsx'));
-const out = XLSX.readFile(first.outputPath);
-const back = XLSX.utils.sheet_to_json(out.Sheets[out.SheetNames[0]], { header: 1 });
-assert.deepStrictEqual(back, rows);
+  const first = await convertFile(input);
+  assert.ok(first.ok, first.error);
+  assert.strictEqual(first.outputPath, path.join(dir, 'Styles & Formats.xlsx'));
+  assert.ok(fs.statSync(first.outputPath).size > 0);
 
-const second = convertFile(input);
-assert.strictEqual(second.outputPath, path.join(dir, 'Budget (1).xlsx'), 'must not overwrite existing output');
+  const second = await convertFile(input);
+  assert.strictEqual(second.outputPath, path.join(dir, 'Styles & Formats (1).xlsx'), 'must not overwrite existing output');
 
-assert.throws(() => convertFile(path.join(dir, 'Budget.xlsx')), /Not a \.numbers file/);
-const junk = path.join(dir, 'Broken.numbers');
-fs.writeFileSync(junk, 'not a spreadsheet');
-assert.throws(() => convertFile(junk), /Could not read/);
+  const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'numbers-out-'));
+  const elsewhere = await convertFile(input, outDir);
+  assert.strictEqual(path.dirname(elsewhere.outputPath), outDir);
 
-fs.rmSync(dir, { recursive: true, force: true });
-console.log('All conversion tests passed.');
+  const charts = await previewFile(fixture('issue-9'));
+  assert.strictEqual(charts.unsupported.charts, 11);
+
+  const locked = await previewFile(fixture('encrypted'));
+  assert.ok(!locked.ok && /password/.test(locked.error));
+
+  const junk = path.join(dir, 'Broken.numbers');
+  fs.writeFileSync(junk, 'not a spreadsheet');
+  const broken = await previewFile(junk);
+  assert.ok(!broken.ok && /Could not read/.test(broken.error));
+
+  const notNumbers = await previewFile(first.outputPath);
+  assert.ok(!notNumbers.ok && /Not a \.numbers file/.test(notNumbers.error));
+
+  stopHelper();
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(outDir, { recursive: true, force: true });
+  console.log('All bridge tests passed.');
+})().catch((err) => {
+  stopHelper();
+  console.error(err);
+  process.exit(1);
+});

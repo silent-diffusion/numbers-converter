@@ -1,6 +1,6 @@
 const path = require('path');
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
-const { convertFile, previewFile } = require('./convert');
+const { convertFile, previewFile, stopHelper } = require('./convert');
 const settings = require('./settings');
 const updater = require('./updater');
 
@@ -91,21 +91,8 @@ function start() {
     return res.canceled ? null : res.filePaths[0];
   });
 
-  ipcMain.handle('files:preview', (_e, inputPath) => {
-    try {
-      return { ok: true, ...previewFile(inputPath) };
-    } catch (err) {
-      return { ok: false, error: err.message };
-    }
-  });
-
-  ipcMain.handle('files:convert', (_e, inputPath) => {
-    try {
-      return { ok: true, ...convertFile(inputPath, config.outputDir) };
-    } catch (err) {
-      return { ok: false, error: err.message };
-    }
-  });
+  ipcMain.handle('files:preview', (_e, inputPath) => previewFile(inputPath));
+  ipcMain.handle('files:convert', (_e, inputPath) => convertFile(inputPath, config.outputDir));
 
   ipcMain.handle('files:reveal', (_e, p) => shell.showItemInFolder(p));
   ipcMain.handle('files:open', (_e, p) => shell.openPath(p));
@@ -116,3 +103,5 @@ function start() {
 }
 
 app.on('window-all-closed', () => app.quit());
+// Stop the helper before quitting so an update installer isn't blocked by its locked files.
+app.on('before-quit', stopHelper);

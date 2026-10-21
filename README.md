@@ -13,13 +13,24 @@ Convert Apple Numbers (`.numbers`) spreadsheets to Excel (`.xlsx`) on Windows, e
 
 ## Use
 
-- Drag `.numbers` files onto the window, or click **Choose files**. Each file opens in a preview showing its sheets and cells.
+- Drag `.numbers` files onto the window, or click **Choose files**. Each file opens in a preview showing its sheets, cells and formatting.
 - Click **Convert & save** to save it as an `.xlsx` next to the original (change the folder in **Settings → General**). Existing files are never overwritten: you get `Budget (1).xlsx` instead.
 - To skip the button, turn on **Settings → General → Convert automatically**. Files are then saved as soon as they're opened.
 - You can also right-click a `.numbers` file → **Open with → Numbers Converter**.
 
-Every table becomes a sheet with its values. Charts, images and some formatting are not carried over.
-Files saved by Numbers as a *package* (a folder) must be re-saved as a single file or zipped first.
+### What carries over
+
+Each Numbers table becomes an Excel sheet, keeping:
+
+- **Values** — numbers, text, dates, durations, checkboxes
+- **Formatting** — fonts, sizes, bold/italic/underline/strikethrough, text and fill colours, borders, alignment, text wrapping, merged cells, column widths, row heights, frozen header rows/columns
+- **Number formats** — currency, percentages, decimals, thousands separators, negative styles, date and time formats
+- **Formulas** — rewritten as Excel formulas so they keep calculating. Formulas that use Numbers-only features (header-name references, Apple-only functions, functions that behave differently in Excel) keep their last value instead, and the app tells you how many.
+
+Not carried over: **charts, images and shapes** (the app tells you when a file has them), conditional highlighting, comments.
+To keep charts, export from Numbers itself (**File → Export To → Excel** on a Mac, iPhone, iPad or iCloud.com).
+
+Files saved by Numbers as a *package* (a folder) must be re-saved as a single file or zipped first. Password-protected files need the password removed in Numbers first.
 
 ## Updates
 
@@ -32,11 +43,17 @@ Conversion itself never uses the internet; only the update check does.
 
 ## Develop
 
+The Numbers reader and Excel writer is a Python helper ([`py/numbers_tool.py`](py/numbers_tool.py), built on
+[numbers-parser](https://github.com/masaccio/numbers-parser) and [XlsxWriter](https://xlsxwriter.readthedocs.io/)).
+The installer ships it as a standalone PyInstaller build, so users don't need Python.
+
 ```bash
 npm install
+py -3.11 -m venv .venv
+.venv\Scripts\pip install -r py/requirements.txt
 npm start        # run the app
-npm test         # conversion round-trip tests
-npm run dist     # build dist/NumbersConverter-Setup-<version>.exe
+npm test         # helper tests + Node bridge tests (uses real Numbers files in test/fixtures)
+npm run dist     # build the helper and dist/NumbersConverter-Setup-<version>.exe
 ```
 
 ### Publishing a new version
@@ -49,7 +66,7 @@ npm run dist     # build dist/NumbersConverter-Setup-<version>.exe
    gh release create v1.0.1 dist/NumbersConverter-Setup-1.0.1.exe dist/NumbersConverter-Setup-1.0.1.exe.blockmap dist/latest.yml --title "v1.0.1" --notes "What changed"
    ```
 
-Built with [Electron](https://www.electronjs.org/), [SheetJS](https://sheetjs.com/) and [electron-updater](https://www.electron.build/auto-update).
+Built with [Electron](https://www.electronjs.org/), [numbers-parser](https://github.com/masaccio/numbers-parser), [XlsxWriter](https://xlsxwriter.readthedocs.io/) and [electron-updater](https://www.electron.build/auto-update).
 
 ## License
 
