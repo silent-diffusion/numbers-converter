@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self'">
+  <title>Numbers Converter</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="icon.png" alt="" width="22" height="22">
+      <span>Numbers Converter</span>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-view="convert" role="tab">Convert</button>
+      <button class="tab" data-view="settings" role="tab">Settings <span class="dot" id="update-dot" hidden></span></button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- Convert -->
+    <section class="view" id="view-convert">
+      <div class="drop" id="drop" tabindex="0">
+        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M12 18v-6"/><path d="m9 15 3 3 3-3"/>
+        </svg>
+        <p class="drop-title">Drop .numbers files here</p>
+        <p class="drop-sub">or</p>
+        <button class="btn primary" id="pick">Choose files</button>
+        <p class="drop-hint" id="out-hint"></p>
+      </div>
+
+      <div class="results" id="results" hidden>
+        <div class="results-head">
+          <span id="results-summary"></span>
+          <button class="btn link" id="clear">Clear</button>
+        </div>
+        <ul id="list"></ul>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section class="view settings" id="view-settings" hidden>
+      <aside class="subnav">
+        <button class="subtab active" data-page="general">General</button>
+        <button class="subtab" data-page="updates">Updates</button>
+      </aside>
+
+      <div class="page" id="page-general">
+        <h2>General</h2>
+        <div class="card">
+          <div class="row">
+            <div>
+              <div class="label">Save converted files</div>
+              <div class="desc" id="out-desc"></div>
+            </div>
+            <div class="row-actions">
+              <button class="btn" id="choose-out">Choose folder…</button>
+              <button class="btn link" id="reset-out" hidden>Use original folder</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="page" id="page-updates" hidden>
+        <h2>Updates</h2>
+        <div class="card">
+          <div class="row">
+            <div>
+              <div class="label">Automatic updates</div>
+              <div class="desc">Download and install new versions in the background.</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="auto-update">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="row">
+            <div>
+              <div class="label">Version <span id="version"></span></div>
+              <div class="desc" id="update-status">—</div>
+              <div class="progress" id="progress" hidden><div id="progress-bar"></div></div>
+            </div>
+            <div class="row-actions">
+              <button class="btn primary" id="install" hidden>Restart to update</button>
+              <button class="btn" id="check">Check for updates</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

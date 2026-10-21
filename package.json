@@ -1,0 +1,69 @@
+{
+  "name": "numbers-converter",
+  "productName": "Numbers Converter",
+  "version": "1.0.0",
+  "description": "Convert Apple Numbers files to Excel, offline.",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node test/convert.test.js",
+    "dist": "electron-builder --win --publish never"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/silent-diffusion/numbers-converter.git"
+  },
+  "author": "silent-diffusion",
+  "license": "MIT",
+  "dependencies": {
+    "electron-updater": "^6.8.9",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "devDependencies": {
+    "electron": "^44.9.3",
+    "electron-builder": "^26.15.3"
+  },
+  "allowScripts": {
+    "electron@44.9.3": true,
+    "electron-winstaller@5.4.0": true
+  },
+  "build": {
+    "appId": "io.github.silent-diffusion.numbers-converter",
+    "productName": "Numbers Converter",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "fileAssociations": [
+      {
+        "ext": "numbers",
+        "name": "Apple Numbers Spreadsheet",
+        "role": "Viewer"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "artifactName": "NumbersConverter-Setup-${version}.${ext}",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Numbers Converter"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "silent-diffusion",
+        "repo": "numbers-converter",
+        "releaseType": "release"
+      }
+    ]
+  }
+}
