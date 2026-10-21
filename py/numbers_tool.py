@@ -24,6 +24,7 @@ from xlsxwriter.utility import xl_range_abs
 
 import extras
 import pivots
+import strokes
 from numbers_parser.cell import (
     RGB,
     BoolCell,
@@ -37,6 +38,7 @@ from numbers_parser.cell import (
 from numbers_parser.cell import _auto_units
 from numbers_parser.constants import DATETIME_FIELD_MAP, DurationStyle, DurationUnits, FormatType
 from numbers_parser.containers import ObjectStore
+from numbers_parser.xrefs import CellRange
 from numbers_parser.numbers_uuid import NumbersUUID
 
 warnings.simplefilter("ignore")
@@ -54,6 +56,30 @@ def _cached_find_refs(self, ref_name):
 
 
 ObjectStore.find_refs = _cached_find_refs
+
+
+# numbers-parser prints references the way Numbers displays them: header names, and table names
+# only where Numbers thinks they're needed, which loses which table a name points to. Print every
+# reference as an exact code instead, ⟦table|row start|row end|column start|column end|absolute
+# flags⟧ (blank = whole row or column), which translate_formula turns into Excel references.
+def _exact_reference(self):
+    if self._ref_error:
+        return "#REF!"
+    table = self.to_table_id if self.to_table_id is not None else self.from_table_id
+    flags = (int(bool(self.row_start_is_abs)) | int(bool(self.col_start_is_abs)) << 1
+             | int(bool(self.row_end_is_abs)) << 2 | int(bool(self.col_end_is_abs)) << 3)
+    part = lambda v: "" if v is None else str(v)  # noqa: E731
+    return f"⟦{table}|{part(self.row_start)}|{part(self.row_end)}|{part(self.col_start)}|{part(self.col_end)}|{flags}⟧"
+
+
+def _light_setup(self):
+    # The exact codes don't use names, so skip numbers-parser's per-reference name lookups (slow).
+    self._ref_error = (self.row_start is not None and self.row_start < 0) or (
+        self.col_start is not None and self.col_start < 0)
+
+
+CellRange.__str__ = _exact_reference
+CellRange.__post_init__ = _light_setup
 
 # numbers-parser formats dates with glibc's "%-d" (no leading zero), which Windows rejects; Windows spells it "%#d".
 if os.name == "nt":
@@ -191,7 +217,10 @@ class Book:
         used = set()
         for sheet in doc.sheets:
             tables = list(sheet.tables)
+            background = sheet_background(doc._model, sheet)
             for table in tables:
+                if background:
+                    SHEET_BACKGROUNDS[(id(table._model), table._table_id)] = background
                 label = sheet.name if len(tables) == 1 else f"{sheet.name} - {table.name}"
                 self.tables.append((unique_sheet_name(label, used), sheet.name, table))
         if not self.tables:
@@ -202,6 +231,12 @@ class Book:
             self.by_table[(sheet_name, table.name)] = excel_name
             self.by_table.setdefault((None, table.name), excel_name)
             self.by_sheet.setdefault(sheet_name, excel_name)
+        # Where each table goes: its sheet, and how many rows sit above it (the title row Numbers
+        # shows when a table's name is visible).
+        self.table_of = {excel_name: table for excel_name, _, table in self.tables}
+        self.excel_of = {table._table_id: excel_name for excel_name, _, table in self.tables}
+        self.titles = {excel_name: table_title(table) for excel_name, _, table in self.tables}
+        self.top = {excel_name: 1 if title else 0 for excel_name, title in self.titles.items()}
         self.unsupported = count_drawables(doc)
         # Pivot tables whose summary values have to be recalculated: {table_id: {(row, col): (value, source cell)}}
         self.pivot_values = {}
@@ -217,6 +252,41 @@ class Book:
                     self.unsupported["pivots"] += 1
 
 
+
+def table_title(table):
+    """{text, font, size, bold, italic, color} for a table whose name Numbers shows above it, else None."""
+    try:
+        model = table._model
+        tm = model.objects[table._table_id]
+        if not tm.table_name_enabled or not table.name:
+            return None
+        style = model.objects[tm.table_name_style.identifier]
+        colour = rgb_hex(rgb_from_proto(model.char_property(style, "font_color")))
+        return {"text": table.name, "font": font_name(model.char_property(style, "font_name")) or "Arial",
+                "size": round(model.char_property(style, "font_size"), 1),
+                "bold": bool(model.char_property(style, "bold")), "italic": bool(model.char_property(style, "italic")),
+                "color": None if colour == "#000000" else colour}
+    except Exception:
+        return None
+
+
+# {(model id, table id): "#RRGGBB"} for tables on sheets with a coloured page background.
+SHEET_BACKGROUNDS = {}
+
+
+def sheet_background(model, sheet):
+    """The sheet's page colour (templates often use one), or None for plain white."""
+    try:
+        style = model.objects[model.objects[sheet._sheet_id].style.identifier]
+        fill = style.sheet_properties.fill
+        if fill.HasField("color"):
+            colour = rgb_hex(rgb_from_proto(fill.color))
+            return None if colour == "#FFFFFF" else colour
+    except Exception:
+        pass
+    return None
+
+
 def stored_sizes(table, columns):
     """Row heights (or column widths) in points that Numbers stores explicitly; other rows are
     sized automatically to fit their content. Table.row_height rebuilds its lookup on every call,
@@ -228,16 +298,28 @@ def stored_sizes(table, columns):
 
 
 def header_sizes(table, columns):
-    """All row heights (or column widths) in points, with automatic ones at the table default."""
+    """All row heights (or column widths) in points. Rows Numbers sizes automatically get the height
+    Numbers last fitted them to (kept in the table's layout cache), and never less than the default."""
     count = table.num_cols if columns else table.num_rows
     try:
         sizes = stored_sizes(table, columns)
         table_model = table._model.objects[table._table_id]
-        default = round(table_model.default_column_width if columns else table_model.default_row_height)
-        return [sizes.get(i, default) for i in range(count)]
+        default = table_model.default_column_width if columns else table_model.default_row_height
+        fitted = {} if columns else fitted_row_heights(table)
+        return [round(sizes.get(i, max(default, fitted.get(i, 0))), 1) for i in range(count)]
     except Exception:
         size = table.col_width if columns else table.row_height
         return [size(i) for i in range(count)]
+
+
+def fitted_row_heights(table):
+    """{row: height} Numbers computed to fit each row's content, from the table's layout cache."""
+    try:
+        info = pivots.find_table_info(table._model, table._table_id)
+        entries = info.layout_engine.width_height_cache.rows_fitting_entries
+        return {row: entry.fitting_size for row, entry in enumerate(entries) if entry.fitting_size > 0}
+    except Exception:
+        return {}
 
 
 def unique_sheet_name(name, used):
@@ -268,7 +350,19 @@ def count_drawables(doc):
 # ---------------------------------------------------------------- cell helpers
 
 
+def error_text(cell):
+    """Excel's name for a Numbers formula error. numbers-parser doesn't say which error it is, so
+    a broken reference shows as #REF! and anything else as #N/A; both spread through other formulas
+    the way Numbers' errors do."""
+    try:
+        return "#REF!" if "#REF!" in (cell.formula or "") else "#N/A"
+    except Exception:
+        return "#N/A"
+
+
 def formatted(cell):
+    if isinstance(cell, ErrorCell):
+        return error_text(cell)
     bullets = extras.bullet_text(cell)
     if bullets:
         return bullets
@@ -310,15 +404,16 @@ _style_cache = {}
 
 
 def table_region(cell):
-    """Which part of the table's theme styles a cell: header row, header column, footer or body
-    (same precedence as numbers-parser), plus whether it's a shaded band in a banded table."""
+    """Which part of the table's theme styles a cell: header row, footer row, header column or
+    body (in that order, so a "Total" cell in the header column takes the footer's look, as in
+    Numbers), plus whether it's a shaded band in a banded table."""
     tm = cell._model.objects[cell._table_id]
     if cell.row < tm.number_of_header_rows:
         return "header_row", False
-    if cell.col < tm.number_of_header_columns:
-        return "header_column", False
     if tm.number_of_footer_rows and cell.row >= tm.number_of_rows - tm.number_of_footer_rows:
         return "footer_row", False
+    if cell.col < tm.number_of_header_columns:
+        return "header_column", False
     return "body", (cell.row - tm.number_of_header_rows) % 2 == 1
 
 
@@ -328,9 +423,10 @@ def theme_fill(cell, region, banded):
         model = cell._model
         tm = model.objects[cell._table_id]
         if region == "body" and banded:
-            props = model.objects[tm.table_style.identifier].table_properties
-            if props.banded_rows and props.banded_fill.HasField("color"):
-                return rgb_hex(rgb_from_proto(props.banded_fill.color))
+            style = model.objects[tm.table_style.identifier]
+            fill = strokes.style_property(model, style, "banded_fill")
+            if strokes.style_property(model, style, "banded_rows") and fill is not None and fill.HasField("color"):
+                return rgb_hex(rgb_from_proto(fill.color))
         fill = model.objects[getattr(tm, f"{region}_style" if region != "body" else "body_cell_style").identifier]
         fill = fill.cell_properties.cell_fill
         if fill.HasField("color"):
@@ -361,6 +457,8 @@ def cell_style(cell):
             bg = theme_fill(cell, region, banded)
             if bg and bg != "#FFFFFF":
                 s["bg"] = bg
+        if "bg" not in s and (id(cell._model), cell._table_id) in SHEET_BACKGROUNDS:
+            s["bg"] = SHEET_BACKGROUNDS[(id(cell._model), cell._table_id)]  # unfilled cells show the page colour
         if "color" in s and is_light(s["color"]) and is_light(s.get("bg", "#FFFFFF")):
             del s["color"]  # light text we couldn't find the dark background for: keep it readable
         _style_cache[key] = s
@@ -406,11 +504,43 @@ def text_and_fill_style(cell):
                 s["va"] = v
         except Exception:
             pass
+    corner = footer_corner_text(cell)
+    if corner:
+        for key, value in corner.items():
+            if value:
+                s[key] = value
+            else:
+                s.pop(key, None)
     return s
 
 
+def footer_corner_text(cell):
+    """numbers-parser styles a footer-row cell in the header column like the header column; Numbers
+    uses the footer row's text style there ("Total" labels). Returns {"b", "i", "color"} or None."""
+    if cell._text_style_id is not None:
+        return None
+    model = cell._model
+    tm = model.objects[cell._table_id]
+    in_footer = tm.number_of_footer_rows and cell.row >= tm.number_of_rows - tm.number_of_footer_rows
+    if not (in_footer and cell.col < tm.number_of_header_columns and cell.row >= tm.number_of_header_rows):
+        return None
+    try:
+        style = model.objects[tm.footer_row_text_style.identifier]
+        colour = rgb_hex(rgb_from_proto(model.char_property(style, "font_color")))
+        return {"b": 1 if model.char_property(style, "bold") else 0,
+                "i": 1 if model.char_property(style, "italic") else 0,
+                "color": colour if colour != "#000000" else None}
+    except Exception:
+        return None
+
+
 def border_style(cell):
-    s = {}
+    """The cell's lines: the table style's lines with any set on individual cells drawn over them."""
+    try:
+        return strokes.cell_lines(cell)
+    except Exception:
+        pass
+    s = {}  # fall back to the cell-level lines numbers-parser reads
     try:
         border = cell.border
     except Exception:
@@ -494,6 +624,8 @@ def preview(path, password=None):
 
         sheets.append({
             "name": excel_name,
+            "title": book.titles.get(excel_name),
+            "background": SHEET_BACKGROUNDS.get((id(table._model), table._table_id)),
             "rows": rows,
             "styles": styles,
             "merges": merges,
@@ -702,6 +834,8 @@ def builtin_number_format(fmt, value=None):
         # Accounting style lines the symbol up at the left edge of the cell, as Numbers does.
         body = f'"{symbol}"* {body}' if fmt.use_accounting_style else f'"{symbol}"{body}'
     negative = {0: f"-{body}", 1: f"[Red]{body}", 2: f"({body})", 3: f"[Red]({body})"}.get(fmt.negative_style, f"-{body}")
+    if fmt.negative_style in (2, 3):
+        body += "_)"  # leave room for the ")" so positive and negative numbers line up, as Numbers does
     return f"{body};{negative}" if fmt.negative_style else body
 
 
@@ -772,10 +906,12 @@ def icu_to_excel_date(pattern):
 # Whole-row/column references (A:A, 3:3) are left out on purpose: Numbers and Excel count header
 # cells in them differently, so they'd silently give different results.
 CELLS = r"""(?:\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?)"""
-NAME = r"""(?:'[^']+'|[^\s:(),'"=<>+\-*/^&{}][^:(),'"=<>+\-*/^&{}]*?)"""
+NAME = r"""(?:'[^']+'|[^\s:(),'"=<>+\-*/^&{}×÷≠≤≥][^:(),'"=<>+\-*/^&{}×÷≠≤≥]*?)"""
+EXACT = re.compile(r"⟦(\d+)\|(\d*)\|(\d*)\|(\d*)\|(\d*)\|(\d+)⟧")
 TOKEN = re.compile(
     rf"""
     (?P<str>"(?:[^"]|"")*")
+  | (?P<exact>⟦[^⟧]*⟧)
   | (?P<xref>(?:{NAME}::){{1,2}}{CELLS}(?![A-Za-z0-9_:]))
   | (?P<func>[A-Z][A-Z0-9.]*)\s*\(
   | (?P<ref>{CELLS})(?![A-Za-z0-9_(:])
@@ -792,17 +928,15 @@ OPERATOR_MAP = {"÷": "/", "×": "*", "≠": "<>", "≤": "<=", "≥": ">="}
 
 
 def referenced_cells(book):
-    """{excel sheet name: [(r1, c1, r2, c2)]} of every range a formula in the file reads."""
+    """{excel sheet name: [(r1, c1, r2, c2)]} of every range a formula in the file reads, in sheet
+    coordinates (0-based, including any title row above the table)."""
     refs = {}
     for excel_name, sheet_name, table in book.tables:
         for row in table.iter_rows():
             for cell in row:
                 if not cell.is_formula:
                     continue
-                try:
-                    excel = translate_formula(cell.formula, book, sheet_name)
-                except Exception:
-                    continue
+                excel = excel_formula(book, sheet_name, cell)
                 for target, rng in re.findall(r"(?:'((?:[^']|'')+)'!)?(\$?[A-Z]{1,3}\$?\d+(?::\$?[A-Z]{1,3}\$?\d+)?)", excel or ""):
                     name = target.replace("''", "'") if target else excel_name
                     refs.setdefault(name, []).append(parse_range(rng.replace("$", "")))
@@ -813,27 +947,206 @@ def is_referenced(refs, r, c):
     return any(r1 <= r <= r2 and c1 <= c <= c2 for r1, c1, r2, c2 in refs)
 
 
-def translate_formula(formula, book, sheet_name):
-    """Numbers formula text -> Excel formula, or None if it can't be represented safely."""
+def excel_formula(book, sheet_name, cell):
+    """The cell's formula in Excel form (None if it has to stay a value), translated once per cell."""
+    cache = book.__dict__.setdefault("_formulas", {})
+    key = (cell._table_id, cell.row, cell.col)
+    if key not in cache:
+        try:
+            # Numbers returns durations from date maths where Excel returns plain numbers (e.g.
+            # NETWORKDAYS), which the duration format would then show as hours, so those keep values.
+            cache[key] = None if isinstance(cell, DurationCell) else translate_formula(cell.formula, book, sheet_name, cell)
+        except Exception:
+            cache[key] = None
+    return cache[key]
+
+
+def shift_rows(cells, offset):
+    """Move every row number in a reference like B2 or $A$3:C9 down by offset rows."""
+    if not offset:
+        return cells
+    return re.sub(r"(\$?[A-Z]{1,3}\$?)(\d+)", lambda m: f"{m.group(1)}{int(m.group(2)) + offset}", cells)
+
+
+def column_letters(index):
+    letters = ""
+    index += 1
+    while index:
+        index, rem = divmod(index - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
+def merge_exact_ranges(formula):
+    """numbers-parser joins the two ends of a range with ":" (⟦a⟧:⟦b⟧); fold them into one code."""
+    def merge(m):
+        a, b = EXACT.fullmatch(m.group(1)).groups(), EXACT.fullmatch(m.group(2)).groups()
+        if a[0] != b[0]:
+            return m.group(0)  # a range across tables isn't something Excel can express
+        rows = sorted(int(v) for v in (a[1], b[1]) if v != "")
+        cols = sorted(int(v) for v in (a[3], b[3]) if v != "")
+        if (a[1] == "") != (b[1] == "") or (a[3] == "") != (b[3] == ""):
+            return m.group(0)
+        flags = (int(a[5]) & 3) | ((int(b[5]) & 3) << 2)
+        part = lambda values, i: str(values[i]) if values else ""  # noqa: E731
+        return f"⟦{a[0]}|{part(rows, 0)}|{part(rows, -1)}|{part(cols, 0)}|{part(cols, -1)}|{flags}⟧"
+    return re.sub(r"(⟦[^⟧]*⟧):(⟦[^⟧]*⟧)", merge, formula)
+
+
+def exact_reference(code, book, own_excel, cell, as_range):
+    """Excel reference for an exact reference code, or None. Whole columns (header names like
+    Amount, or column letters) mean the column's body cells, without header and footer rows, when
+    they're a whole function argument (SUM(Amount)); anywhere else Numbers uses the cell in the
+    formula's own row (Price×Quantity), which only makes sense within the formula's own table.
+    Whole rows work the same way across the body columns."""
+    table_id, r1, r2, c1, c2, flags = EXACT.fullmatch(code).groups()
+    excel = book.excel_of.get(int(table_id))
+    if excel is None:
+        return None
+    table = book.table_of[excel]
+    if table._model.objects[table._table_id].HasField("pivot_owner"):
+        return None  # pivot cells are laid out in display order, not the order references use
+    tm = table._model.objects[table._table_id]
+    top = book.top.get(excel, 0)
+    flags = int(flags)
+    prefix = "" if excel == own_excel else "'" + excel.replace("'", "''") + "'!"
+    row_abs, col_abs, row2_abs, col2_abs = ("$" if flags >> i & 1 else "" for i in range(4))
+    r1, r2, c1, c2 = (int(v) if v != "" else None for v in (r1, r2, c1, c2))
+    r2 = r1 if r2 is None else r2
+    c2 = c1 if c2 is None else c2
+    if r1 is not None and c1 is not None:
+        start = f"{col_abs}{column_letters(c1)}{row_abs}{r1 + top + 1}"
+        end = f"{col2_abs}{column_letters(c2)}{row2_abs}{r2 + top + 1}"
+        return prefix + (start if (r1, c1) == (r2, c2) else f"{start}:{end}")
+    if c1 is not None:  # whole column(s)
+        first, last = tm.number_of_header_rows, table.num_rows - tm.number_of_footer_rows - 1
+        if as_range and last >= first:
+            return (f"{prefix}{col_abs}{column_letters(c1)}{first + top + 1}:"
+                    f"{col2_abs or col_abs}{column_letters(c2)}{last + top + 1}")
+        if not as_range and c1 == c2 and excel == own_excel and cell is not None and first <= cell.row <= last:
+            return f"{col_abs}{column_letters(c1)}{cell.row + top + 1}"
+        return None
+    if r1 is not None:  # whole row(s)
+        first, last = tm.number_of_header_columns, table.num_cols - 1
+        if as_range and last >= first:
+            return f"{prefix}{column_letters(first)}{row_abs}{r1 + top + 1}:{column_letters(last)}{row2_abs or row_abs}{r2 + top + 1}"
+        if not as_range and r1 == r2 and excel == own_excel and cell is not None and first <= cell.col <= last:
+            return f"{column_letters(cell.col)}{row_abs}{r1 + top + 1}"
+    return None
+
+
+# Lookups that can do an approximate match: (argument with the values searched, argument choosing
+# the match type, or None if always approximate).
+LOOKUP_ARGUMENTS = {"MATCH": (1, 2), "LOOKUP": (1, None), "VLOOKUP": (1, 3), "HLOOKUP": (1, 3)}
+
+
+def lookup_is_safe(name, args, book):
+    """An approximate-match lookup gives the same answer in Excel only if the values it searches are
+    sorted: Numbers finds the right value regardless, Excel's search assumes sorted data. Exact
+    matches are always safe. Anything we can't check counts as unsafe."""
+    values_arg, mode_arg = LOOKUP_ARGUMENTS[name]
+    meaningful = lambda tokens: [t for t in tokens if t[0] != "ws"]  # noqa: E731
+    mode = meaningful(args[mode_arg]) if mode_arg is not None and mode_arg < len(args) else []
+    mode_text = "".join(t[1] for t in mode).upper()
+    if mode_text in ("0", "FALSE", "FALSE()"):
+        return True
+    if mode_text not in ("", "1", "TRUE", "TRUE()", "-1"):
+        return False
+    searched = meaningful(args[values_arg]) if values_arg < len(args) else []
+    if len(searched) != 1 or searched[0][0] != "exact":
+        return False
+    values = searched_values(searched[0][1], book, first_column=name == "VLOOKUP", first_row=name == "HLOOKUP")
+    if values is None:
+        return False
+    while values and values[-1] is None:  # trailing blank rows are harmless
+        values.pop()
+    if any(v is None for v in values):
+        return False
+    keys = [excel_sort_key(v) for v in values]
+    if mode_text == "-1":
+        return all(a >= b for a, b in zip(keys, keys[1:]))
+    return all(a <= b for a, b in zip(keys, keys[1:]))
+
+
+def searched_values(code, book, first_column=False, first_row=False):
+    """Cell values an exact reference covers (whole columns/rows meaning their body cells)."""
+    table_id, r1, r2, c1, c2, _ = EXACT.fullmatch(code).groups()
+    excel = book.excel_of.get(int(table_id))
+    if excel is None:
+        return None
+    table = book.table_of[excel]
+    tm = table._model.objects[table._table_id]
+    rows = table_rows(table)
+    if r1 == "":  # whole column(s): the body rows
+        r1, r2 = tm.number_of_header_rows, table.num_rows - tm.number_of_footer_rows - 1
+    else:
+        r1 = int(r1)
+        r2 = int(r2) if r2 else r1
+    if c1 == "":  # whole row(s): the body columns
+        c1, c2 = tm.number_of_header_columns, table.num_cols - 1
+    else:
+        c1 = int(c1)
+        c2 = int(c2) if c2 else c1
+    if first_column:
+        c2 = c1
+    if first_row:
+        r2 = r1
+    if r1 != r2 and c1 != c2:
+        return None  # a block, not a single row or column
+    try:
+        return [rows[r][c].value for r in range(r1, r2 + 1) for c in range(c1, c2 + 1)]
+    except IndexError:
+        return None
+
+
+def excel_sort_key(value):
+    """How Excel orders values when it searches: numbers and dates, then text, then TRUE/FALSE."""
+    if isinstance(value, bool):
+        return (2, value)
+    if isinstance(value, (int, float)):
+        return (0, float(value))
+    if isinstance(value, (dt.datetime, dt.timedelta)):
+        return (0, cached_value_of(value))
+    return (1, str(value).casefold())
+
+
+def cached_value_of(value):
+    if isinstance(value, dt.timedelta):
+        return value.total_seconds() / 86400
+    delta = naive(value) - EXCEL_EPOCH
+    return delta.days + delta.seconds / 86400
+
+
+def translate_formula(formula, book, sheet_name, cell=None):
+    """Numbers formula text -> Excel formula, or None if it can't be represented safely. `cell` is
+    the formula's own cell, which places references relative to its table's position on the sheet."""
     if not formula or not formula.strip():
         return None  # e.g. pivot table summaries, which numbers-parser can't decode
+    excel_of = getattr(book, "excel_of", {})
+    own_excel = excel_of.get(cell._table_id) if cell is not None else None
+    tops = getattr(book, "top", {})
     out = []
-    # One frame per open parenthesis: [function name or None, commas seen, any argument text seen].
+    # One frame per open parenthesis: [function name or None, commas seen, any argument text seen,
+    # the tokens of each argument].
     stack = []
-    for m in TOKEN.finditer(formula):
-        kind, text = m.lastgroup, m.group()
+    tokens = [(m.lastgroup, m.group()) for m in TOKEN.finditer(merge_exact_ranges(formula))]
+    significant = [i for i, (kind, _) in enumerate(tokens) if kind != "ws"]
+    for i, (kind, text) in enumerate(tokens):
         if stack and kind != "ws" and text not in (",", ")"):
             stack[-1][2] = True
+        if stack and text not in (",", ")"):
+            stack[-1][3][-1].append((kind, text))
         if kind == "op" and text == "(":
-            stack.append([None, 0, False])
+            stack.append([None, 0, False, [[]]])
         elif kind == "op" and text == ",":
             if not stack:
                 return None
             stack[-1][1] += 1
+            stack[-1][3].append([])
         elif kind == "op" and text == ")":
             if not stack:
                 return None
-            name, commas, seen = stack.pop()
+            name, commas, seen, args = stack.pop()
             if not name and commas:
                 return None  # Numbers' (A1,B2) list syntax; Excel reads it as a union and gives #VALUE!
             if name:
@@ -841,6 +1154,12 @@ def translate_formula(formula, book, sheet_name):
                 low, high = EXCEL_FUNCTIONS[name]
                 if count < low or (high is not None and count > high):
                     return None
+                if name in LOOKUP_ARGUMENTS and not lookup_is_safe(name, args, book):
+                    return None
+                if name == "ROW" and tops.get(own_excel, 0):
+                    # Numbers counts rows within the table; the title row above it moves Excel's count.
+                    out.append(")-" + str(tops[own_excel]) + ")")
+                    continue
         if kind == "str":
             if re.search(r"\d{1,4}[/.-]\d{1,2}[/.-]\d{1,4}", text):
                 return None  # dates written as text are read using the computer's region settings
@@ -857,21 +1176,31 @@ def translate_formula(formula, book, sheet_name):
                 )
             if target is None:
                 return None
-            out.append("'" + target.replace("'", "''") + "'!" + cells)
+            out.append("'" + target.replace("'", "''") + "'!" + shift_rows(cells, tops.get(target, 0)))
         elif kind == "ref":
-            out.append(text)
+            out.append(shift_rows(text, tops.get(own_excel, 0)))
         elif kind == "func":
-            name = m.group("func")
+            name = text.rstrip("( \t")
             if name not in EXCEL_FUNCTIONS:
                 return None
-            stack.append([name, 0, False])
-            out.append(name + "(")
+            stack.append([name, 0, False, [[]]])
+            out.append(("(" if name == "ROW" and tops.get(own_excel, 0) else "") + name + "(")
         elif kind in ("bool", "num", "op", "ws"):
             out.append(text)
         elif text in OPERATOR_MAP:
             out.append(OPERATOR_MAP[text])
+        elif kind == "exact":
+            position = significant.index(i)
+            before = tokens[significant[position - 1]] if position > 0 else (None, None)
+            after = tokens[significant[position + 1]][1] if position + 1 < len(significant) else None
+            opens_argument = before[0] == "func" or before[1] in ("(", ",")  # "SUM(" arrives as one token
+            as_range = bool(stack and stack[-1][0]) and opens_argument and after in (",", ")")
+            excel = exact_reference(text, book, own_excel, cell, as_range) if excel_of else None
+            if excel is None:
+                return None
+            out.append(excel)
         else:
-            return None  # column-name references, array constants, unknown syntax, etc.
+            return None  # array constants, ranges across tables, unknown syntax, etc.
     if stack:
         return None
     return "=" + "".join(out)
@@ -937,6 +1266,48 @@ def naive(value):
     return value.replace(tzinfo=None) if value.tzinfo else value
 
 
+class OffsetSheet:
+    """A worksheet seen from a table placed `top` rows down it (below its title): calls that take
+    a row are shifted, so the table can be written in its own coordinates."""
+
+    ROW_ARGS = {name: (0,) for name in (
+        "write_blank", "write_string", "write_number", "write_boolean", "write_datetime", "write_formula",
+        "write_url", "write_rich_string", "write_comment", "insert_checkbox", "set_row", "set_row_pixels",
+        "freeze_panes")}
+    ROW_ARGS.update({name: (0, 2) for name in ("merge_range", "data_validation", "autofilter")})
+
+    def __init__(self, ws, top):
+        self.ws, self.top = ws, top
+
+    def __getattr__(self, name):
+        method = getattr(self.ws, name)
+        positions = self.ROW_ARGS.get(name)
+        if not positions or not self.top:
+            return method
+
+        def shifted(*args, **kwargs):
+            args = list(args)
+            for p in positions:
+                if p < len(args) and isinstance(args[p], int):
+                    args[p] += self.top
+            return method(*args, **kwargs)
+        return shifted
+
+
+def write_title(ws, title, table, formats, background):
+    """The table's name in a row above it, merged across the table, as Numbers shows it."""
+    style = {"font": title["font"], "size": title["size"], "ha": "center", "va": "middle",
+             "b": 1 if title["bold"] else 0, "i": 1 if title["italic"] else 0,
+             "color": title["color"], "bg": background}
+    fmt = formats.get({k: v for k, v in style.items() if v}, None)
+    # Line height of the title's font plus Numbers' spacing (Apple's export: 27.5pt for 12pt Helvetica).
+    ws.set_row(0, round(title["size"] * (2.5 if title["font"] == "Segoe UI" else 2.3) * 2) / 2)
+    if table.num_cols > 1:
+        ws.merge_range(0, 0, 0, table.num_cols - 1, title["text"], fmt)
+    else:
+        ws.write_string(0, 0, title["text"], fmt)
+
+
 def convert(path, out, password=None):
     book = load(path, password)
     workbook = xlsxwriter.Workbook(out, {"use_future_functions": True, "strings_to_numbers": False,
@@ -947,23 +1318,21 @@ def convert(path, out, password=None):
     refs = referenced_cells(book)
 
     for excel_name, sheet_name, table in book.tables:
-        ws = workbook.add_worksheet(excel_name)
+        sheet = workbook.add_worksheet(excel_name)
+        sheet.hide_gridlines(2)  # Numbers shows no grid outside a table's own lines, which are drawn as borders
+        top = book.top.get(excel_name, 0)
+        if top:
+            write_title(sheet, book.titles[excel_name], table, formats,
+                        SHEET_BACKGROUNDS.get((id(table._model), table._table_id)))
+        ws = OffsetSheet(sheet, top)
         sheet_refs = refs.get(excel_name, [])
+        # Sizes stay in points, like the fonts, so text fits its cells as it does in Numbers.
         hidden_cols = extras.hidden(table, columns=True)
         for c, width in enumerate(header_sizes(table, columns=True)):
-            ws.set_column_pixels(c, c, max(8, width), None, {"hidden": c in hidden_cols})
-        try:
-            heights = stored_sizes(table, columns=False)
-        except Exception:
-            heights = {}
+            ws.set_column_pixels(c, c, max(8, round(width * 4 / 3)), None, {"hidden": c in hidden_cols})
         hidden_rows = extras.hidden(table, columns=False)
-        for r in sorted(set(heights) | hidden_rows):  # rows Numbers sizes automatically are left for Excel to fit
-            if r >= table.num_rows:
-                continue
-            if r in heights:
-                ws.set_row_pixels(r, heights[r], None, {"hidden": r in hidden_rows})
-            else:
-                ws.set_row(r, None, None, {"hidden": True})
+        for r, height in enumerate(header_sizes(table, columns=False)):
+            ws.set_row(r, height, None, {"hidden": r in hidden_rows})
         if table.num_header_rows or table.num_header_cols:
             ws.freeze_panes(table.num_header_rows, table.num_header_cols)
         if extras.filter_enabled(table) and table.num_rows > 1:
@@ -994,7 +1363,7 @@ def convert(path, out, password=None):
                 if (r, c) in merged_anchors:
                     r2, c2 = merged_anchors[(r, c)]
                     ws.merge_range(r, c, r2, c2, None, fmt)
-                if not write_special(ws, r, c, cell, style, fmt, formats, is_referenced(sheet_refs, r, c)):
+                if not write_special(ws, r, c, cell, style, fmt, formats, lambda r=r, c=c: is_referenced(sheet_refs, r + top, c)):
                     write_cell(ws, r, c, cell, fmt, book, sheet_name, stats)
                 add_cell_extras(ws, r, c, cell, lists)
 
@@ -1002,14 +1371,15 @@ def convert(path, out, password=None):
     return {"outputPath": out, "sheets": len(book.tables), "unsupported": book.unsupported, **stats}
 
 
-def write_special(ws, r, c, cell, style, fmt, formats, referenced=False):
+def write_special(ws, r, c, cell, style, fmt, formats, referenced=lambda: False):
     """Write cells that need more than a plain value: checkboxes, links and mixed formatting.
-    Returns False to let write_cell handle the cell normally."""
+    Returns False to let write_cell handle the cell normally. `referenced()` says whether a
+    formula reads the cell (only worked out when it matters, as it's slow on big files)."""
     if cell.is_formula:
         return False
     bullets = extras.bullet_text(cell)
     # Bullets are only display formatting in Numbers, so a cell a formula reads keeps its plain text.
-    if bullets and not referenced and not extras.links(cell):
+    if bullets and not extras.links(cell) and not referenced():
         ws.write_string(r, c, bullets, fmt)
         return True
     control = extras.control(cell)
@@ -1098,15 +1468,11 @@ def cached_value(cell):
 
 def write_cell(ws, r, c, cell, fmt, book, sheet_name, stats):
     if cell.is_formula:
-        excel = formula = None
+        excel = excel_formula(book, sheet_name, cell)
         try:
             formula = cell.formula
-            # Numbers returns durations from date maths where Excel returns plain numbers (e.g. NETWORKDAYS),
-            # which the duration format would then show as hours, so those keep their values.
-            if not isinstance(cell, DurationCell):
-                excel = translate_formula(formula, book, sheet_name)
         except Exception:
-            pass
+            formula = None
         if excel:
             stats["formulas"] += 1
             ws.write_formula(r, c, excel, fmt, cached_value(cell))
@@ -1115,10 +1481,11 @@ def write_cell(ws, r, c, cell, fmt, book, sheet_name, stats):
             stats["formulasAsValues"] += 1
 
     value = cell.value
-    if isinstance(cell, EmptyCell) or value is None:
+    if isinstance(cell, ErrorCell):
+        error = error_text(cell)
+        ws.write_formula(r, c, "=" + error, fmt, error)
+    elif isinstance(cell, EmptyCell) or value is None:
         ws.write_blank(r, c, None, fmt)
-    elif isinstance(cell, ErrorCell):
-        ws.write_string(r, c, formatted(cell) or "#ERROR", fmt)
     elif isinstance(cell, BoolCell) or isinstance(value, bool):
         ws.write_boolean(r, c, bool(value), fmt)
     elif isinstance(cell, DateCell) and value.year < 1900:

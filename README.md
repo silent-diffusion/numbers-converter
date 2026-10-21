@@ -20,17 +20,18 @@ Convert Apple Numbers (`.numbers`) spreadsheets to Excel (`.xlsx`) on Windows, e
 
 ### What carries over
 
-Each Numbers table becomes an Excel sheet, keeping:
+Each Numbers table becomes an Excel sheet (with the table's name in a title row above it when Numbers shows it), keeping:
 
 - **Values** — numbers, text, dates, durations, checkboxes
-- **Formatting** — fonts, sizes, bold/italic/underline/strikethrough, text and fill colours, borders, alignment, text wrapping, merged cells, column widths, row heights, frozen header rows/columns
+- **Table styles** — the table theme's lines, header/footer colours and banded rows, the sheet's page colour, and Numbers' own row heights and column widths (in points, so text fits as it does in Numbers). Excel's gridlines are turned off, as Numbers shows none.
+- **Formatting** — fonts, sizes, bold/italic/underline/strikethrough, text and fill colours, cell borders, alignment, text wrapping, merged cells, frozen header rows/columns
 - **Number formats** — currency (including accounting style), percentages, decimals, thousands separators, negative styles, fractions, durations, date and time formats
 - **Cell extras** — comments (as Excel notes), links, bold/italic/coloured words within a cell, bullet and numbered lists, hidden rows and columns, filters (as Excel AutoFilter)
 - **Form controls** — checkboxes (Excel checkboxes), pop-up menus (dropdown lists), sliders, steppers and star ratings (as number-range rules)
-- **Formulas** — rewritten as Excel formulas so they keep calculating. Formulas that use Numbers-only features (header-name references, Apple-only functions, functions that behave differently in Excel) keep their last value instead, and the app tells you how many.
+- **Formulas** — rewritten as Excel formulas so they keep calculating, including references to other tables and to columns by their header name (`SUM(Amount)`). Formulas that use Apple-only functions, functions that behave differently in Excel, or approximate lookups on unsorted data (where Excel's answer can differ) keep their last value instead, and the app tells you how many.
 - **Pivot tables** — newer versions of Numbers don't save pivot totals in the file, so the app recalculates them from the pivot's rules and its source data (grouping by value, date part, etc.; sum, average, count, minimum, maximum). Pivot results are saved as values, not as an Excel pivot table. Any pivot it can't reproduce exactly (e.g. "show as percentage" or running totals) is reported and its totals are left blank rather than guessed.
 
-Not carried over yet: **charts, images and shapes** (the app tells you when a file has them), conditional highlighting, and the grouped view of tables with categories (their rows come out in their original order).
+Not carried over yet: **charts, images, shapes and text boxes** (the app tells you when a file has charts, images or shapes), conditional highlighting, and the grouped view of tables with categories (their rows come out in their original order).
 To keep charts, export from Numbers itself (**File → Export To → Excel** on a Mac, iPhone, iPad or iCloud.com).
 
 Password-protected files ask for the password (and show its hint); it's only kept in memory while the app is open.
@@ -59,6 +60,17 @@ py -3.11 -m venv .venv
 npm start        # run the app
 npm test         # helper tests + Node bridge tests (uses real Numbers files in test/fixtures)
 npm run dist     # build the helper and dist/NumbersConverter-Setup-<version>.exe
+```
+
+### Measuring against Apple's own export
+
+[`tools/compare_with_apple.py`](tools/compare_with_apple.py) converts every `X.numbers` in a folder that also has
+Apple's `X.xlsx` export (File → Export To → Excel in Numbers), opens both in Excel, and scores how closely each
+cell matches: text, formulas, fonts, fills, borders, alignment, number formats, row heights and column widths.
+Needs Windows with Excel. Pivot tables are skipped (Apple writes Excel pivot tables, laid out Excel's way).
+
+```bash
+.venv\Scripts\python tools/compare_with_apple.py path\to\folder
 ```
 
 ### Publishing a new version

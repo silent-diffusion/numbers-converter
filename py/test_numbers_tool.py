@@ -30,6 +30,16 @@ def convert(name):
     return result, load_workbook(out)
 
 
+def at(name, ws, ref):
+    """The cell at table position `ref` (e.g. "A7") on a converted sheet, allowing for the title row
+    above tables whose name Numbers shows."""
+    return ws[shifted(name, ws.title, ref)]
+
+
+def shifted(name, sheet, ref):
+    return nt.shift_rows(ref, nt.load(fixture(name)).top.get(sheet, 0))
+
+
 class FakeBook:
     by_table = {("Main", "Prices"): "Main - Prices", (None, "Prices"): "Main - Prices", (None, "Totals"): "Totals"}
     by_sheet = {"Totals": "Totals"}
@@ -68,11 +78,52 @@ def test_formula_translation():
     assert t("DURATION(1,2,3)") is None  # same name, different meaning in Excel
     assert t("SUM(A:A)") is None  # whole-column reference
     assert t("AVERAGEIFS({1,2},{1,0},\">0\")") is None  # array constant
-    assert t("COUNTA(fruit)") is None  # header-name reference
+    assert t("COUNTA(fruit)") is None  # header name nothing defines
     assert t("SUM(Unknown::A1)") is None
     assert t("STOCK(\"AAPL\",1)") is None
     assert t("GCD(5,(A1,A2))") is None  # list syntax
     assert t("DATEDIF(\"15/05/2001\",\"15/07/2002\",\"D\")") is None  # region-dependent text dates
+
+
+def test_header_names_and_titles_in_formulas():
+    # In Numbers a header name means the column's body cells inside a function call
+    # (COUNTA('Column X & Y') counts 7 cells) and the same row's cell elsewhere. The table also
+    # moves down a row in Excel under its title, which references and ROW() must allow for.
+    book = nt.load(fixture("test-styles"))
+    excel_name, sheet_name, table = book.tables[1]
+    assert book.top[excel_name] == 1
+    cell = next(c for row in nt.table_rows(table) for c in row if c.is_formula)
+    assert cell.formula == '"Row Header "&CHAR(64+COLUMN())&ROW()'
+    assert nt.translate_formula(cell.formula, book, sheet_name, cell) == '="Row Header "&CHAR(64+COLUMN())&(ROW()-1)'
+
+    _, wb = convert("create-formulas")
+    ws = wb["Main Sheet - Formula Tests"]
+    assert at("create-formulas", ws, "A7").value == "=SUM(" + shifted("create-formulas", ws.title, "A2:B2") + ")"
+
+
+def test_approximate_lookups_need_sorted_data():
+    # Excel's approximate MATCH/LOOKUP/VLOOKUP assume sorted data; Numbers doesn't. Unsorted -> value.
+    book = SimpleNamespace(excel_of={7: "T"}, table_of={}, top={})
+    rows = {"sorted": [1, 2, 5, 9, None], "unsorted": ["Pears", "Apples", "Leeks"]}
+
+    def check(name, mode, values):
+        table = SimpleNamespace(num_rows=len(values) + 1, num_cols=1, _table_id=7,
+                                _model=SimpleNamespace(objects={7: SimpleNamespace(
+                                    number_of_header_rows=1, number_of_footer_rows=0, number_of_header_columns=0,
+                                    HasField=lambda f: False)}))
+        book.table_of["T"] = table
+        original = nt.table_rows
+        nt.table_rows = lambda t: [[SimpleNamespace(value="Header")]] + [[SimpleNamespace(value=v)] for v in values]
+        try:
+            args = [[("str", '"x"')], [("exact", "⟦7|||0||0⟧")]] + ([[mode]] if mode else [])  # all of column A
+            return nt.lookup_is_safe(name, args, book)
+        finally:
+            nt.table_rows = original
+
+    assert check("MATCH", None, rows["sorted"])  # approximate on sorted data, trailing blank ignored
+    assert not check("MATCH", None, rows["unsorted"])
+    assert check("MATCH", ("num", "0"), rows["unsorted"])  # exact match is always fine
+    assert not check("LOOKUP", None, rows["unsorted"])
 
 
 def test_styles_are_kept():
@@ -80,7 +131,7 @@ def test_styles_are_kept():
     assert result["sheets"] == 4
     assert result["formulas"] == 41 and result["formulasAsValues"] == 0
     ws = wb["Styles"]
-    title = ws["A1"]
+    title = at("test-styles", ws, "A1")
     assert title.value == 'name="Title",bold,font_size=24.0'
     assert title.font.b and title.font.sz == 24
     red = next(c for row in ws.iter_rows() for c in row if c.value and "Heading Red" in str(c.value))
@@ -102,7 +153,7 @@ def test_formulas_are_kept():
     result, wb = convert("create-formulas")
     assert result["formulas"] > 30
     ws = wb["Main Sheet - Formula Tests"]
-    assert ws["A7"].value == "=SUM(A2:B2)"
+    assert at("create-formulas", ws, "A7").value == "=SUM(" + shifted("create-formulas", ws.title, "A2:B2") + ")"
 
 
 def test_preview():
@@ -157,7 +208,7 @@ def test_pivot_tables_convert():
     assert result["unsupported"]["pivots"] == 0
     formulas = [c.value for ws in wb.worksheets for row in ws.iter_rows() for c in row if isinstance(c.value, str) and c.value.startswith("=")]
     assert "=" not in formulas  # undecodable pivot formulas must not become empty formulas
-    assert wb["Sales - Sales Pivot"]["B3"].value == 18400
+    assert at("test-pivot", wb["Sales - Sales Pivot"], "B3").value == 18400
 
 
 def rpn(*tokens):
@@ -292,32 +343,34 @@ def test_form_controls():
     _, wb = convert("test-actions")
     ws = wb.worksheets[0]
     rules = {str(dv.sqref): dv for dv in ws.data_validations.dataValidation}
-    assert rules["A5"].type == "list" and rules["A5"].formula1 == '"Item 1,Item 2,Item 3"'  # pop-up menu
-    assert rules["B2"].type == "whole" and rules["B2"].formula2 == "5"  # star rating 0-5
-    assert rules["A3"].type == "whole" and rules["A3"].formula2 == "100"  # slider
-    assert ws["A1"].value is False and ws["B1"].value is True  # checkboxes
+    rule = lambda ref: rules[shifted("test-actions", ws.title, ref)]  # noqa: E731
+    assert rule("A5").type == "list" and rule("A5").formula1 == '"Item 1,Item 2,Item 3"'  # pop-up menu
+    assert rule("B2").type == "whole" and rule("B2").formula2 == "5"  # star rating 0-5
+    assert rule("A3").type == "whole" and rule("A3").formula2 == "100"  # slider
+    assert at("test-actions", ws, "A1").value is False and at("test-actions", ws, "B1").value is True  # checkboxes
 
 
 def test_comments_links_bullets_and_rich_text():
     _, wb = convert("test-comments")
-    ws = wb.worksheets[0]
-    assert ws["A1"].comment.text.startswith("Comment #1") and ws["A1"].comment.author == "Jon Connell"
+    note = at("test-comments", wb.worksheets[0], "A1").comment
+    assert note.text.startswith("Comment #1") and note.author == "Jon Connell"
 
     _, wb = convert("test-hlinks")
     ws = wb.worksheets[0]
-    assert ws["A1"].hyperlink.target == "http://news.bbc.co.uk/"
-    assert "http://google.co.uk/" in ws["A1"].comment.text  # Excel allows one link per cell; the rest are noted
-    assert ws["A3"].value == "this is a list:\n• first item\n• second item\n• third item"
+    assert at("test-hlinks", ws, "A1").hyperlink.target == "http://news.bbc.co.uk/"
+    assert "http://google.co.uk/" in at("test-hlinks", ws, "A1").comment.text  # one link per cell; the rest are noted
+    assert at("test-hlinks", ws, "A3").value == "this is a list:\n• first item\n• second item\n• third item"
 
     _, wb = convert("test-bullets")
     ws = wb.worksheets[0]
-    assert ws["B1"].value == "• this\n• is some\n• bulleted\n• text"
+    assert at("test-bullets", ws, "B1").value == "• this\n• is some\n• bulleted\n• text"
     # B2 is read by =LEFT(B2,1); bullets are display-only in Numbers, so its text stays as it was.
-    assert ws["B2"].value == "this\nis some\nnumbered\ntext"
+    assert at("test-bullets", ws, "B2").value == "this\nis some\nnumbered\ntext"
 
     out = os.path.join(OUT, "rich.xlsx")
     nt.convert(fixture("test-formats"), out)
-    rich = load_workbook(out, rich_text=True).worksheets[0]["C7"].value
+    ws = load_workbook(out, rich_text=True).worksheets[0]
+    rich = at("test-formats", ws, "C7").value
     runs = [(str(part.text), bool(part.font.b), bool(part.font.i)) for part in rich if hasattr(part, "font")]
     assert ("the", True, False) in runs and ("quick", False, True) in runs
 
@@ -342,7 +395,7 @@ def test_hidden_rows_and_columns():
     out = os.path.join(OUT, "hidden.xlsx")
     nt.convert(path, out)
     ws = load_workbook(out).worksheets[0]
-    assert ws.row_dimensions[2].hidden and ws.column_dimensions["C"].hidden
+    assert ws.row_dimensions[2 + book.top[ws.title]].hidden and ws.column_dimensions["C"].hidden
     nt._cache.clear()
 
 

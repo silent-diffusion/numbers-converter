@@ -309,7 +309,7 @@ function buildTable(sheet) {
   cols.append(el('col', 'rowhead-col'));
   visibleCols.forEach((c) => {
     const col = el('col');
-    col.style.width = `${sheet.colWidths[c]}px`;
+    col.style.width = `${sheet.colWidths[c] * PT_TO_PX}px`; // sizes are in points, like the fonts
     cols.append(col);
   });
   table.append(cols);
@@ -323,11 +323,14 @@ function buildTable(sheet) {
 
   const spans = new Map(sheet.merges.map(([r1, c1, r2, c2]) => [`${r1},${c1}`, [r2 - r1 + 1, c2 - c1 + 1]]));
   const body = el('tbody');
+  // The table's name, when Numbers shows it, sits in its own row above the table (as in the saved file).
+  const top = sheet.title ? 1 : 0;
+  if (sheet.title) body.append(titleRow(sheet, visibleCols.length));
   sheet.rows.forEach((row, r) => {
     if (hiddenRows.has(r)) return;
     const tr = el('tr');
-    tr.style.height = `${sheet.rowHeights[r]}px`;
-    tr.append(el('th', null, String(r + 1)));
+    tr.style.height = `${sheet.rowHeights[r] * PT_TO_PX}px`;
+    tr.append(el('th', null, String(r + 1 + top)));
     row.forEach((cell, c) => {
       if (cell === null || hiddenCols.has(c)) return; // covered by a merged cell, or hidden
       const [text, styleIdx, extra = {}] = typeof cell === 'string' ? [cell, 0] : cell;
@@ -358,6 +361,18 @@ function buildTable(sheet) {
   });
   table.append(body);
   return table;
+}
+
+function titleRow(sheet, span) {
+  const { text, font, size, bold, italic, color } = sheet.title;
+  const tr = el('tr', 'title-row');
+  tr.append(el('th', null, '1'));
+  const td = el('td', null, text);
+  td.colSpan = span;
+  applyStyle(td, { font, size, b: bold, i: italic, color, bg: sheet.background, ha: 'center', va: 'middle' });
+  tr.style.height = `${size * 2.3 * PT_TO_PX}px`;
+  tr.append(td);
+  return tr;
 }
 
 /* ---------- Drag & drop, buttons ---------- */

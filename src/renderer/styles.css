@@ -193,7 +193,7 @@ li.error .status-icon, li.error .file-meta { color: var(--danger); }
 .grid col.rowhead-col { width: 40px; }
 .grid td {
   padding: 2px 5px;
-  border: 1px solid #e3e3e3;
+  border: 1px solid transparent; /* only the table's own lines show, as in Numbers and the saved file */
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   vertical-align: middle;
 }
@@ -207,6 +207,7 @@ li.error .status-icon, li.error .file-meta { color: var(--danger); }
 .grid tbody th { position: sticky; left: 0; z-index: 1; text-align: right; }
 .grid thead th.corner { left: 0; z-index: 3; }
 .grid td { position: relative; }
+.grid tr.title-row td { border-color: transparent; }
 .grid td.has-link { color: #0563C1; text-decoration: underline; cursor: help; }
 .grid td.has-note::after {  /* red corner marker, as Excel shows notes */
   content: ""; position: absolute; top: 0; right: 0;
