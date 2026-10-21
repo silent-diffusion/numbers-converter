@@ -112,7 +112,7 @@ EXCEL_FUNCTIONS = {
     "DATEDIF": (3, 3), "YEARFRAC": (2, 3), "DATEVALUE": (1, 1), "TIMEVALUE": (1, 1), "DAYS": (2, 2),
     # lookup
     "VLOOKUP": (3, 4), "HLOOKUP": (3, 4), "LOOKUP": (2, 3), "MATCH": (2, 3), "INDEX": (2, 4),
-    "CHOOSE": (2, N), "ROWS": (1, 1), "COLUMNS": (1, 1), "XLOOKUP": (3, 6),
+    "CHOOSE": (2, N), "ROW": (0, 1), "COLUMN": (0, 1), "ROWS": (1, 1), "COLUMNS": (1, 1), "XLOOKUP": (3, 6),
     # finance
     "PMT": (3, 5), "FV": (3, 5), "PV": (3, 5), "NPER": (3, 5), "RATE": (3, 6), "NPV": (2, N), "IRR": (1, 2),
     "IPMT": (4, 6), "PPMT": (4, 6),

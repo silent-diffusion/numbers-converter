@@ -53,6 +53,7 @@ def test_formula_translation():
     assert t("SUM((A1+B1),C1)") == "=SUM((A1+B1),C1)"
     assert t("TODAY()") == "=TODAY()"
     assert t("IF(A1>0,1)") == "=IF(A1>0,1)"
+    assert t('"Row "&CHAR(64+COLUMN())&ROW()') == '="Row "&CHAR(64+COLUMN())&ROW()'
     # Things Excel would reject or compute differently keep their values instead.
     assert t("IF(A1)") is None  # too few arguments
     assert t("PI(1)") is None  # too many arguments
@@ -69,6 +70,7 @@ def test_formula_translation():
 def test_styles_are_kept():
     result, wb = convert("test-styles")
     assert result["sheets"] == 4
+    assert result["formulas"] == 41 and result["formulasAsValues"] == 0
     ws = wb["Styles"]
     title = ws["A1"]
     assert title.value == 'name="Title",bold,font_size=24.0'
