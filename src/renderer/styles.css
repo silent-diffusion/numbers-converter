@@ -578,6 +578,7 @@ details.technical summary { cursor: pointer; }
 .switch .knob { position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 6px; background: var(--text-2); transition: left .12s; }
 .switch[aria-checked="true"] { border-color: var(--accent); background: var(--accent); }
 .switch[aria-checked="true"] .knob { left: 23px; background: var(--accent-text); }
+.switch:disabled { opacity: .45; cursor: default; }
 .privacy-card { display: flex; gap: 14px; padding: 16px; }
 .privacy-card .label { font-weight: 600; }
 .privacy-card .desc { font-size: 13px; line-height: 18px; margin: 4px 0 2px; }

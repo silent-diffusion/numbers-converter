@@ -7,9 +7,24 @@ Convert Apple Numbers (`.numbers`) spreadsheets to Excel (`.xlsx`) on Windows, e
 ## Install
 
 1. Download **`NumbersConverter-Setup-x.y.z.exe`** from the [latest release](https://github.com/silent-diffusion/numbers-converter/releases/latest).
-2. Double-click it. It installs for the current user (no admin needed) and opens the app.
+2. Double-click it. It installs for the current user (no admin needed), opens the app, and keeps it up to date (see [Updates](#updates)).
 
 > The installer isn't code-signed yet, so Windows SmartScreen may say "Windows protected your PC". Click **More info → Run anyway**.
+
+Or install it with [Scoop](https://scoop.sh). Scoop installs a copy of its own, which `scoop update numbers-converter` keeps up to date:
+
+```bash
+scoop bucket add numbers-converter https://github.com/silent-diffusion/numbers-converter
+scoop install numbers-converter
+```
+
+Or don't install it at all: unzip **`NumbersConverter-x.y.z-win-x64.zip`** from the release anywhere and open `Numbers Converter.exe`. That copy doesn't update itself; get the new zip when there's a new version.
+
+**Checking a download:** each release lists the SHA-256 of its installer and zip in `SHA256SUMS.txt` (compare with `Get-FileHash <file>` in PowerShell), and GitHub keeps a signed record that they were built from this repository by its release workflow. To check that record:
+
+```bash
+gh attestation verify NumbersConverter-Setup-x.y.z.exe --repo silent-diffusion/numbers-converter
+```
 
 ## Use
 
@@ -54,6 +69,8 @@ Password-protected files ask for the password and show its hint; the password is
 - **Check for updates automatically** (on by default): checks GitHub Releases at startup and every 6 hours, downloads new versions in the background, and installs them the next time you restart. When one is ready, an **Update ready · Restart** button appears at the top of the window.
 - Turn it off and the app never goes online on its own; it only checks when you click **Check for updates**.
 
+Copies installed with Scoop, or unzipped from the zip, don't update themselves, as that would install a second copy beside them. Scoop updates its copy (`scoop update numbers-converter`), and a zip copy is replaced by the new zip; **Settings → Updates** says which applies.
+
 ## Privacy
 
 Numbers Converter does all of its work on your PC.
@@ -81,7 +98,7 @@ py -3.11 -m venv .venv
 .venv\Scripts\pip install -r py/requirements.txt
 npm start        # run the app
 npm test         # helper tests + Node bridge tests (uses real Numbers files in test/fixtures)
-npm run dist     # build the helper and dist/NumbersConverter-Setup-<version>.exe
+npm run dist     # build the helper, then the installer and the portable zip in dist/
 ```
 
 ### Measuring against Apple's own export
@@ -99,13 +116,33 @@ Needs Windows with Excel. Pivot tables are skipped (Apple writes Excel pivot tab
 
 ### Publishing a new version
 
-1. Bump `version` in `package.json` and commit.
-2. `npm run dist`
-3. Create the release with the installer and update metadata attached (installed apps read `latest.yml` to find updates):
+GitHub Actions ([`.github/workflows/build.yml`](.github/workflows/build.yml)) builds and tests every push and pull
+request on Windows, and publishes a release when a version tag is pushed:
+
+1. Bump `version` in `package.json` and commit it to `main`.
+2. Tag that commit with the version, with the release notes as the tag's message, and push the tag:
 
    ```bash
-   gh release create v1.0.1 dist/NumbersConverter-Setup-1.0.1.exe dist/NumbersConverter-Setup-1.0.1.exe.blockmap dist/latest.yml --title "v1.0.1" --notes "What changed"
+   git tag -a v1.0.1 -m "What changed"
+   git push origin v1.0.1
    ```
+
+The workflow checks that the tag matches `package.json`, then:
+
+- creates the release with the installer, its `.blockmap` and `latest.yml` (installed copies read `latest.yml` to find
+  updates), the portable zip and `SHA256SUMS.txt`, and records build provenance for the installer and the zip;
+- writes the version's Scoop manifest to `bucket/numbers-converter.json` on `main` (that folder is what makes this
+  repository a Scoop bucket);
+- sends the version to winget as a pull request to [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs),
+  once the repository has a `WINGET_TOKEN` secret: a classic personal access token with the `public_repo` scope, from
+  an account with a fork of winget-pkgs. The package's first version goes in by hand, from the manifests in
+  [`packaging/winget`](packaging/winget).
+
+**Actions → Build → Run workflow** goes through the release steps as a dry run, without publishing anything.
+
+A release made by hand (`npm run dist`, then `gh release create v1.0.1 dist/NumbersConverter-Setup-1.0.1.exe
+dist/NumbersConverter-Setup-1.0.1.exe.blockmap dist/latest.yml`) is left as it is, so that version gets no zip,
+Scoop manifest or winget update.
 
 Built with [Electron](https://www.electronjs.org/), [numbers-parser](https://github.com/masaccio/numbers-parser), [XlsxWriter](https://xlsxwriter.readthedocs.io/) and [electron-updater](https://www.electron.build/auto-update).
 

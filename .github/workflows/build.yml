@@ -1,0 +1,166 @@
+# Builds and tests the Windows installer and portable zip on every push and pull request.
+# Pushing a version tag (v1.2.3, matching package.json) also publishes them: the GitHub release
+# with the files installed copies read to update, SHA-256 checksums and build provenance; then
+# the Scoop manifest in bucket/ and, once a WINGET_TOKEN secret is set up, a winget pull request.
+# Running the workflow by hand goes through the release steps without publishing anything.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: py/requirements.txt
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Python packages
+        run: |
+          python -m venv .venv
+          .venv\Scripts\python -m pip install --upgrade pip
+          .venv\Scripts\python -m pip install -r py/requirements.txt
+
+      - name: Node packages
+        run: npm ci
+
+      - name: Tests
+        run: npm test
+
+      - name: Build the installer and the portable zip
+        run: npm run dist
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $sums = Get-ChildItem dist -File | Where-Object Name -Match '^NumbersConverter-.*\.(exe|zip)$' | ForEach-Object {
+            '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name
+          }
+          # Unix line endings, so sha256sum -c can check the files too
+          [IO.File]::WriteAllText("$PWD/dist/SHA256SUMS.txt", ($sums -join "`n") + "`n")
+          Get-Content dist/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: numbers-converter
+          path: |
+            dist/NumbersConverter-*.exe
+            dist/NumbersConverter-*.exe.blockmap
+            dist/NumbersConverter-*.zip
+            dist/latest.yml
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # the release, and the Scoop manifest on main
+      id-token: write     # build provenance
+      attestations: write
+    env:
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' }}
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # tags and main: the release notes, and the Scoop manifest
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: numbers-converter
+          path: dist
+
+      - name: Check the version and the files
+        run: |
+          version=$(node -p "require('./package.json').version")
+          tag="${GITHUB_REF_NAME}"
+          if [ "$DRY_RUN" = "true" ]; then tag="v$version"; fi
+          if [ "$tag" != "v$version" ]; then
+            echo "::error::The tag $tag doesn't match the version in package.json ($version)."
+            exit 1
+          fi
+          ls -l "dist/NumbersConverter-Setup-$version.exe" "dist/NumbersConverter-Setup-$version.exe.blockmap" \
+                "dist/NumbersConverter-$version-win-x64.zip" dist/latest.yml dist/SHA256SUMS.txt
+          grep -q "NumbersConverter-Setup-$version.exe" dist/latest.yml
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Build provenance
+        if: env.DRY_RUN != 'true'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/NumbersConverter-Setup-*.exe
+            dist/NumbersConverter-*-win-x64.zip
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          files=("dist/NumbersConverter-Setup-$VERSION.exe" "dist/NumbersConverter-Setup-$VERSION.exe.blockmap" \
+                 dist/latest.yml "dist/NumbersConverter-$VERSION-win-x64.zip" dist/SHA256SUMS.txt)
+          # An annotated tag's message becomes the release notes; otherwise GitHub writes them.
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG" 2> /dev/null || true  # as pushed, annotation and all
+          notes=(--generate-notes)
+          if [ "$(git cat-file -t "$TAG" 2>/dev/null)" = "tag" ]; then notes=(--notes-from-tag); fi
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run. Publishing $TAG would run: gh release create $TAG ${files[*]} --title $TAG ${notes[*]}"
+            echo "ALREADY_PUBLISHED=true" >> "$GITHUB_ENV"
+          elif gh release view "$TAG" > /dev/null 2>&1; then
+            echo "::notice::$TAG was already published by hand, so it's left as it is."
+            echo "ALREADY_PUBLISHED=true" >> "$GITHUB_ENV"
+          else
+            gh release create "$TAG" "${files[@]}" --title "$TAG" "${notes[@]}"
+          fi
+
+      - name: Update the Scoop manifest
+        run: |
+          hash=$(sha256sum "dist/NumbersConverter-$VERSION-win-x64.zip" | cut -d' ' -f1)
+          cp tools/scoop-manifest.js "$RUNNER_TEMP/"  # main may not have it yet on a dry run
+          git fetch origin main
+          git checkout -B main origin/main
+          mkdir -p bucket
+          node "$RUNNER_TEMP/scoop-manifest.js" "$VERSION" "$hash" > bucket/numbers-converter.json
+          cat bucket/numbers-converter.json
+          if [ "${ALREADY_PUBLISHED:-}" = "true" ]; then echo "Not committed (dry run, or published by hand)."; exit 0; fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bucket/numbers-converter.json
+          git commit -m "Scoop: Numbers Converter $VERSION"
+          git push origin main
+
+      - name: Send the new version to winget
+        if: env.WINGET_TOKEN != '' && env.ALREADY_PUBLISHED != 'true'
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: SilentDiffusion.NumbersConverter
+          installers-regex: 'NumbersConverter-Setup-.*\.exe$'
+          release-tag: ${{ env.TAG }}
+          token: ${{ secrets.WINGET_TOKEN }}

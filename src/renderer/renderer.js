@@ -1030,6 +1030,7 @@ function renderUpdate(s) {
   $('#progress').hidden = s.status !== 'downloading';
   check.disabled = ['checking', 'downloading', 'unsupported'].includes(s.status);
   check.hidden = ready;
+  $('#auto-update').disabled = Boolean(s.managedBy); // Scoop, or a portable copy: updated another way
 
   switch (s.status) {
     case 'checking': status.textContent = 'Checking for updates…'; break;
