@@ -11,20 +11,12 @@ Convert Apple Numbers (`.numbers`) spreadsheets to Excel (`.xlsx`) on Windows, e
 
 > The installer isn't code-signed yet, so Windows SmartScreen may say "Windows protected your PC". Click **More info → Run anyway**.
 
-Or use a package manager:
+Or install it with [Scoop](https://scoop.sh). Scoop installs a copy of its own, which `scoop update numbers-converter` keeps up to date:
 
-- **winget** (coming soon) runs the same installer:
-
-  ```bash
-  winget install SilentDiffusion.NumbersConverter
-  ```
-
-- **Scoop** installs a copy of its own, which Scoop updates (`scoop update numbers-converter`):
-
-  ```bash
-  scoop bucket add numbers-converter https://github.com/silent-diffusion/numbers-converter
-  scoop install numbers-converter
-  ```
+```bash
+scoop bucket add numbers-converter https://github.com/silent-diffusion/numbers-converter
+scoop install numbers-converter
+```
 
 Or don't install it at all: unzip **`NumbersConverter-x.y.z-win-x64.zip`** from the release anywhere and open `Numbers Converter.exe`. That copy doesn't update itself; get the new zip when there's a new version.
 
