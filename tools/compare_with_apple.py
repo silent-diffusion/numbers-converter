@@ -228,6 +228,27 @@ def compare_file(excel, numbers_path, apple_path, ours_path, max_rows, totals, e
                    f"{label}: apple {a['values']} ours {o['values']}")
             record(totals, file_scores, file_totals, examples, "chart labels", a["labels"] == o["labels"],
                    f"{label}: apple {a['labels']} ours {o['labels']}")
+        # Text boxes: matched by their text, comparing the font of their first letter and, where both
+        # workbooks put a Numbers sheet on one worksheet, where they sit. Then lines and other shapes.
+        mine = shape_list(ours)
+        for a in shape_list(apple):
+            if not a["text"]:
+                continue
+            o = next((s for s in mine if s["text"] == a["text"]), None)
+            label = f"{name} text box {a['text'][:30]!r}"
+            record(totals, file_scores, file_totals, examples, "text box", o is not None, f"{label}: missing from ours")
+            if o is None:
+                continue
+            mine.remove(o)
+            record(totals, file_scores, file_totals, examples, "text box font", (a["size"], a["bold"]) == (o["size"], o["bold"]),
+                   f"{label}: apple {a['size']}pt bold={a['bold']} ours {o['size']}pt bold={o['bold']}")
+            if options["default"] == "sheet" and a["sheet"] == o["sheet"]:
+                near = abs(a["left"] - o["left"]) <= 12 and abs(a["top"] - o["top"]) <= 12
+                record(totals, file_scores, file_totals, examples, "text box place", near,
+                       f"{label}: apple at ({a['left']:.0f}, {a['top']:.0f})pt ours ({o['left']:.0f}, {o['top']:.0f})pt")
+        others = lambda shapes: sorted(s["kind"] for s in shapes if not s["text"])  # noqa: E731
+        record(totals, file_scores, file_totals, examples, "shapes", others(shape_list(apple)) == others(shape_list(ours)),
+               f"{name}: apple {others(shape_list(apple))} ours {others(shape_list(ours))}")
     finally:
         apple.Close(False)
         ours.Close(False)
@@ -249,6 +270,25 @@ def chart_list(wb):
                 labels.append([str(x) for x in (series.XValues or ())])
             found.append({"title": chart.ChartTitle.Text if chart.HasTitle else None, "type": chart.ChartType,
                           "values": values, "labels": labels})
+    return found
+
+
+def shape_list(wb):
+    """Every text box, shape and picture in a workbook (not charts): its worksheet, text (spaces
+    and line breaks folded), place in points, the font size and boldness of its first letter, and
+    what kind of shape it is."""
+    found = []
+    for ws in wb.Worksheets:
+        for i in range(1, ws.Shapes.Count + 1):
+            shape = ws.Shapes(i)
+            if shape.HasChart:
+                continue
+            frame = shape.TextFrame2 if shape.Type != 13 else None  # msoPicture has no text
+            text = " ".join(str(frame.TextRange.Text).split()) if frame is not None and frame.HasText else ""
+            first = shape.TextFrame.Characters(1, 1).Font if text else None
+            found.append({"sheet": ws.Name, "text": text, "left": shape.Left, "top": shape.Top,
+                          "size": round(first.Size, 1) if first else None, "bold": bool(first.Bold) if first else None,
+                          "kind": "picture" if shape.Type == 13 else "line" if shape.Height < 1 or shape.Width < 1 else "shape"})
     return found
 
 

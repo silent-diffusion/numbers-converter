@@ -463,7 +463,7 @@ function showSheet(f, grid, key) {
   const sheets = f.preview.sheets;
   f.sheet = Math.min(f.sheet, sheets.length - 1);
   const sheet = sheets[f.sheet];
-  if (!sheet.rows.length && !sheet.charts?.length) {
+  if (!sheet.rows.length && !sheet.charts?.length && !sheet.drawings?.length) {
     stateView(grid, el('div', 'grid-message', 'This sheet is empty.'));
     return;
   }
@@ -714,31 +714,38 @@ function applyStyle(td, s) {
   }
 }
 
-// A sheet as it will look in Excel: the table, with its charts drawn over the sheet where they'll be.
+// A sheet as it will look in Excel: the table, with its charts, text boxes, shapes and pictures
+// drawn over the sheet where they'll be, stacked as Excel stacks them (pictures, charts, shapes).
 function buildSheet(sheet) {
   const area = el('div', 'sheet-area');
   if (sheet.rows.length) area.append(buildTable(sheet));
-  if (sheet.charts?.length) {
+  const drawings = sheet.drawings || [];
+  if (sheet.charts?.length || drawings.length) {
     const layer = el('div', 'chart-layer');
-    for (const chart of sheet.charts) {
-      let drawing;
+    const add = (what, draw) => {
       try {
-        drawing = drawChart(chart);
+        layer.append(draw());
       } catch (err) {
-        console.error('Could not draw a chart preview', err); // the saved file still has it
-        continue;
+        console.error(`Could not draw a ${what} preview`, err); // the saved file still has it
       }
-      drawing.style.left = `${chart.x}px`;
-      drawing.style.top = `${chart.y}px`;
-      layer.append(drawing);
+    };
+    drawings.filter((d) => d.kind === 'image').forEach((d) => add('picture', () => drawDrawing(d)));
+    for (const chart of sheet.charts || []) {
+      add('chart', () => {
+        const drawing = drawChart(chart);
+        drawing.style.left = `${chart.x}px`;
+        drawing.style.top = `${chart.y}px`;
+        return drawing;
+      });
     }
+    drawings.filter((d) => d.kind !== 'image').forEach((d) => add('shape', () => drawDrawing(d)));
     area.append(layer);
   }
   return area;
 }
 
-// Chart positions are measured from the sheet's first cell (A1), which sits below and right of
-// the row and column labels; once the sheet is on the page, line the charts up with it.
+// Chart and drawing positions are measured from the sheet's first cell (A1), which sits below and
+// right of the row and column labels; once the sheet is on the page, line them up with it.
 function placeCharts(area) {
   const layer = area.querySelector('.chart-layer');
   if (!layer) return;

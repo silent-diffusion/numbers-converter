@@ -27,7 +27,9 @@ from numbers_parser import Document
 from xlsxwriter.utility import xl_range_abs
 
 import charts
+import drawings
 import extras
+import highlights
 import pivots
 import strokes
 from layout import SHEET, TABLES, Footprint, Layout
@@ -268,8 +270,9 @@ def technical(err, path=None):
 
 
 class Book:
-    """A Numbers document as read: its sheets and tables, table titles, charts and pivot tables.
-    Where everything goes in the workbook depends on the layout chosen (see layout())."""
+    """A Numbers document as read: its sheets and tables, table titles, charts, text boxes, shapes,
+    pictures, highlighting rules and pivot tables. Where everything goes in the workbook depends on
+    the layout chosen (see layout())."""
 
     def __init__(self, doc):
         self.doc = doc
@@ -295,6 +298,21 @@ class Book:
             self.unsupported["charts"] = len(self.chart_problems)
         except Exception:  # never let a chart stop the tables converting
             self.charts = []
+        try:
+            self.drawings = drawings.read_drawings(self, SimpleNamespace(
+                font=font_name, bold=font_is_bold, note=lambda name: note_font(doc._model, name)))
+        except Exception:  # nor a text box or picture: they stay counted as not converted
+            self.drawings = []
+        for d in self.drawings:
+            self.unsupported[d.counts_as] = max(0, self.unsupported[d.counts_as] - 1)
+        self.highlights = {}  # {table_id: highlights.Rules}, for tables with conditional highlighting
+        for _, table in self.tables:
+            try:
+                rules = highlights.read_rules(table)
+            except Exception:
+                rules = highlights.unreadable_rules(table)
+            if rules is not None:
+                self.highlights[table._table_id] = rules
         # Pivot tables whose summary values have to be recalculated: {table_id: {(row, col): (value, source cell)}}
         self.pivot_values = {}
         for _, table in self.tables:
@@ -736,10 +754,10 @@ def preview(path, password=None, layout_options=None):
     may hold "runs" ([[text, style index], ...]), "link", "note" and "control"; None marks a cell
     covered by a merged one. Each sheet also says which Numbers sheet it shows ("numbersSheet"),
     how many tables that has ("tableCount") and how it's laid out ("layout"), and lists its charts
-    (see charts.describe)."""
+    (see charts.describe) and its text boxes, shapes and pictures (see drawings.describe)."""
     book = load(path, password)
     layout = book.layout(layout_options)
-    sheets = [preview_sheet(book, ws) for ws in layout.sheets]  # styles the cells, noting fonts for the report
+    sheets = [preview_sheet(book, layout, ws) for ws in layout.sheets]  # styles the cells, noting fonts for the report
     return {"sheets": sheets, "unsupported": book.unsupported, "report": change_report(book, layout)}
 
 
@@ -791,16 +809,16 @@ def change_report(book, layout):
         return layout.report
     kept_values = {}  # reason -> {"count", "names"}
     cells = []
-    live = conditional = grouped = captions = filtered = custom_formats = 0
+    live = conditional = highlighted = grouped = captions = filtered = custom_formats = 0
     for sheet_name, table in book.tables:
         placed = layout.place.get(table._table_id)
         if placed is None or table._model.objects[table._table_id].HasField("pivot_owner"):
             continue  # pivot tables are reported as pivots
-        highlighted = False
+        rules, missed = table_highlights(layout, sheet_name, table)
+        highlighted += bool(rules)
+        conditional += bool(missed)
         for row in table.iter_rows():
             for cell in row:
-                if getattr(cell, "_cond_style_id", None) is not None:
-                    highlighted = True
                 if isinstance(cell, NumberCell) and custom_format_dropped(cell):
                     custom_formats += 1
                 if not cell.is_formula:
@@ -822,7 +840,6 @@ def change_report(book, layout):
                 if len(cells) < REPORT_CELLS:
                     r, c = placed.row + cell.row, placed.col + cell.col
                     cells.append({"sheet": placed.sheet, "ref": f"{column_letters(c)}{r + 1}", "row": r, "col": c})
-        conditional += highlighted
         grouped += safely(lambda: table.categorized_data() is not None)
         captions += safely(lambda: table.caption_enabled and table.caption.strip())
         filtered += safely(lambda: extras.filter_enabled(table))
@@ -853,13 +870,14 @@ def change_report(book, layout):
     u = book.unsupported
     if u.get("shapes"):
         n = u["shapes"]
-        changes.append({"kind": "shapes", "title": f"{counted(n, 'text box or shape', 'text boxes and shapes')} "
-                                                   f"{'isn’t' if n == 1 else 'aren’t'} converted yet",
-                        "detail": "Headings, notes and drawings placed on the sheets are left out of the Excel file for now."})
+        changes.append({"kind": "shapes", "title": f"{counted(n, 'text box or shape', 'text boxes and shapes')} can’t be converted",
+                        "detail": f"{'It’s' if n == 1 else 'They’re'} stored in a way this app doesn’t recognise yet, so "
+                                  f"{'it’s' if n == 1 else 'they’re'} left out of the Excel file."})
     if u.get("images"):
         n = u["images"]
-        changes.append({"kind": "images", "title": f"{counted(n, 'image')} {'isn’t' if n == 1 else 'aren’t'} converted yet",
-                        "detail": "Pictures placed on the sheets are left out of the Excel file for now."})
+        changes.append({"kind": "images", "title": f"{counted(n, 'image')} can’t be converted",
+                        "detail": "Excel can’t show pictures saved in some formats (such as HEIC, TIFF or PDF) or videos, so "
+                                  f"{'it’s' if n == 1 else 'they’re'} left out of the Excel file."})
     if u.get("charts"):
         n = u["charts"]
         bubble = any("bubble" in problem.lower() for problem in book.chart_problems)
@@ -873,8 +891,9 @@ def change_report(book, layout):
                                   "with “show as” values, such as percentages or running totals."})
     if conditional:
         changes.append({"kind": "highlighting", "title": f"{counted(conditional, 'table')} {'uses' if conditional == 1 else 'use'} "
-                                                         "conditional highlighting",
-                        "detail": "The highlighting rules aren’t converted yet, so cells keep their normal formatting in Excel."})
+                                                         "highlighting rules Excel can’t match",
+                        "detail": "Those rules are left out, so the cells they’d highlight keep their normal formatting in "
+                                  "Excel. Any other highlighting rules carry over."})
     if custom_formats:
         changes.append({"kind": "formats", "title": f"{counted(custom_formats, 'cell')} {'has' if custom_formats == 1 else 'have'} "
                                                     "a custom number format",
@@ -886,8 +905,8 @@ def change_report(book, layout):
         names = quoted[0] if len(quoted) == 1 else ", ".join(quoted[:-1]) + " and " + quoted[-1]
         changes.append({"kind": "sheets",
                         "title": f"The sheet {names} is left out" if len(dropped) == 1 else f"{counted(len(dropped), 'sheet')} are left out",
-                        "detail": ("It has" if len(dropped) == 1 else f"{names} have") + " no tables or charts, so there’s nothing "
-                                  "for an Excel sheet to show."})
+                        "detail": ("It has" if len(dropped) == 1 else f"{names} have") + " no tables, charts, text boxes or "
+                                  "images, so there’s nothing for an Excel sheet to show."})
 
     if book.pivot_values:
         n = len(book.pivot_values)
@@ -923,11 +942,38 @@ def change_report(book, layout):
 
     charts_kept = len(book.charts)
     kept = [counted(len(book.tables), "table") + (f" and {counted(charts_kept, 'chart')}, linked to the data" if charts_kept else "")]
+    placed = [d for ws in layout.sheets for d, _ in ws.drawings]
+    drawn = [counted(n, one, many) for n, one, many in (
+        (sum(d.kind == "text" for d in placed), "text box", "text boxes"),
+        (sum(d.kind in ("shape", "line") for d in placed), "shape", "shapes"),
+        (sum(d.kind == "image" for d in placed), "image", "images")) if n]
+    if drawn:
+        kept.append(drawn[0] if len(drawn) == 1 else ", ".join(drawn[:-1]) + " and " + drawn[-1])
     if live:
         kept.append(f"{counted(live, 'formula')} that {'keeps' if live == 1 else 'keep'} calculating in Excel")
     kept.append("Formatting, borders and number formats")
+    if highlighted:
+        kept.append(f"Conditional highlighting in {counted(highlighted, 'table')}")
     layout.report = {"changes": changes, "notes": notes, "kept": kept}
     return layout.report
+
+
+def table_highlights(layout, sheet_name, table):
+    """A table's highlighting rules as Excel's in this layout, and how many Excel can't express
+    (see highlights.excel_rules), worked out once."""
+    rules = layout.book.highlights.get(table._table_id)
+    placed = layout.place.get(table._table_id)
+    if rules is None or placed is None:
+        return [], 0
+    if table._table_id not in layout.highlights:
+        def translate(text, r, c):
+            return translate_formula(text, layout, sheet_name, highlights.host(table._table_id, r, c))
+        try:
+            layout.highlights[table._table_id] = highlights.excel_rules(
+                rules, translate, lambda r, c: (placed.row + r, placed.col + c))
+        except Exception:  # never let a rule stop the table converting
+            layout.highlights[table._table_id] = [], sum(len(rule_list) for rule_list in rules.sets.values()) or 1
+    return layout.highlights[table._table_id]
 
 
 _custom_dropped = {}
@@ -948,7 +994,7 @@ def custom_format_dropped(cell):
     return _custom_dropped[key]
 
 
-def preview_sheet(book, ws):
+def preview_sheet(book, layout, ws):
     total_rows, total_cols = ws.size()
     rows_shown, cols_shown = min(total_rows, PREVIEW_MAX_ROWS), min(total_cols, PREVIEW_MAX_COLS)
     grid = [[""] * cols_shown for _ in range(rows_shown)]
@@ -981,6 +1027,9 @@ def preview_sheet(book, ws):
             grid[placed.title_row][placed.col] = [title["text"], style_index({k: v for k, v in st.items() if v})]
             merge(placed.title_row, placed.col, placed.title_row, placed.col + table.num_cols - 1)
         computed = book.pivot_values.get(table._table_id, {})
+        rules = {}  # highlighting rules by key, to show what they highlight as Excel will
+        for rule in table_highlights(layout, book.sheet_name_of[table._table_id], table)[0]:
+            rules.setdefault(rule["key"], []).append(rule)
         for r, source_row in enumerate(table_rows(table)):
             row = placed.row + r
             if row >= rows_shown:
@@ -993,6 +1042,13 @@ def preview_sheet(book, ws):
                     grid[row][col] = None
                     continue
                 st = cell_style(cell)
+                if getattr(cell, "_cond_style_id", None) in rules and not isinstance(cell, ErrorCell):
+                    value = None if isinstance(cell, EmptyCell) else cached_value(cell) if isinstance(cell, (DateCell, DurationCell)) else cell.value
+                    for key, setting in (highlights.preview_style(rules[cell._cond_style_id], value) or {}).items():
+                        if setting:
+                            st[key] = setting
+                        else:
+                            st.pop(key, None)
                 if (is_numeric(cell) or (r, c) in computed) and "ha" not in st:
                     st["ha"] = "right"
                 index = style_index(st)
@@ -1009,12 +1065,14 @@ def preview_sheet(book, ws):
             r1, c1, r2, c2 = parse_range(rng)
             merge(placed.row + r1, placed.col + c1, placed.row + r2, placed.col + c2)
 
+    budget = [drawings.PREVIEW_PICTURE_LIMIT]  # bytes of pictures this sheet's preview may carry
     return {
         "name": ws.name,
         "numbersSheet": ws.numbers_sheet,
         "tableCount": ws.table_count,
         "layout": ws.mode,
         "charts": [charts.describe(chart, position) for chart, position in ws.charts],
+        "drawings": [drawings.describe(d, position, budget) for d, position in ws.drawings],
         "rows": grid,
         "styles": styles,
         "merges": merges,
@@ -1682,6 +1740,27 @@ class FormatCache:
         self.cache[key] = fmt
         return fmt
 
+    def highlight(self, style):
+        """The format of a highlighting rule: only what it changes ({color, b, i, u, st, bg}, as in
+        cell_style), or None for a rule that changes nothing."""
+        if not style:
+            return None
+        key = ("highlight", json.dumps(style, sort_keys=True))
+        if key not in self.cache:
+            props = {}
+            if style.get("color"):
+                props["font_color"] = style["color"]
+            for name, prop in (("b", "bold"), ("i", "italic"), ("st", "font_strikeout")):
+                if style.get(name):
+                    props[prop] = True
+            if style.get("u"):
+                props["underline"] = 1
+            if style.get("bg"):
+                props["bg_color"] = style["bg"]
+                props["pattern"] = 1
+            self.cache[key] = self.workbook.add_format(props)
+        return self.cache[key]
+
 
 def excel_border(width, kind):
     if kind == "dashes":
@@ -1782,6 +1861,7 @@ def convert(path, out, password=None, layout_options=None, contents=False):
 
     stats["charts"] = charts.write_charts(workbook, layout, worksheets, cell_info,
                                           lambda name: unique_sheet_name(name, set(layout.used_names)))
+    stats["drawings"] = drawings.write_drawings(layout, worksheets)
     if contents_sheet is not None:
         write_contents(contents_sheet, layout, formats, os.path.basename(path.rstrip("\\/")))
     try:
@@ -1809,7 +1889,7 @@ def write_contents(ws, layout, formats, file_name):
     row = 4
     for plan in layout.sheets:
         entries = [(placed.table.name, placed.title_row if placed.title_row is not None else placed.row, placed.col)
-                   for placed in plan.tables] or [("Charts", 0, 0)]
+                   for placed in plan.tables] or [("Charts" if plan.charts else "Text and images", 0, 0)]
         for name, r, c in entries:
             cell = f"{column_letters(c)}{r + 1}"
             sheet = plan.name.replace("'", "''")
@@ -1859,6 +1939,8 @@ def write_table(sheet, placed, layout, formats, lists, stats, sheet_refs):
                                  lambda r=r, c=c: is_referenced(sheet_refs, r + top, c + left)):
                 write_cell(ws, r, c, cell, fmt, layout, sheet_name, stats)
             add_cell_extras(ws, r, c, cell, lists)
+    rules, _ = table_highlights(layout, sheet_name, table)
+    highlights.write(sheet, rules, formats.highlight)
 
 
 def write_special(ws, r, c, cell, style, fmt, formats, referenced=lambda: False):

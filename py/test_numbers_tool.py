@@ -1,7 +1,9 @@
 """Tests for numbers_tool.py, run with: .venv/Scripts/python py/test_numbers_tool.py"""
 
 import datetime as dt
+import html
 import os
+import re
 import sys
 import tempfile
 import zipfile
@@ -11,10 +13,13 @@ from numbers_parser import Document
 from numbers_parser.constants import DurationStyle, DurationUnits, FormatType
 from numbers_parser.formula import FUNCTION_NAME_TO_ID
 from numbers_parser.generated import TSCEArchives_pb2 as TSCE
+from numbers_parser.generated import TSDArchives_pb2 as TSD
 from openpyxl import load_workbook
 
 sys.path.insert(0, os.path.dirname(__file__))
 import charts  # noqa: E402
+import drawings  # noqa: E402
+import highlights  # noqa: E402
 import layout  # noqa: E402
 import numbers_tool as nt  # noqa: E402
 import pivots  # noqa: E402
@@ -246,8 +251,9 @@ def rpn(*tokens):
             n.AST_node_type = pivots.NODE.Value("FUNCTION_NODE")
             n.AST_function_node_index = FUNCTION_NAME_TO_ID[name]
             n.AST_function_node_numArgs = int(argc)
-        elif tok in ("+", "-", "*", "/", "="):
-            names = {"+": "ADDITION", "-": "SUBTRACTION", "*": "MULTIPLICATION", "/": "DIVISION", "=": "EQUAL_TO"}
+        elif tok in ("+", "-", "*", "/", "=", ">", "<"):
+            names = {"+": "ADDITION", "-": "SUBTRACTION", "*": "MULTIPLICATION", "/": "DIVISION", "=": "EQUAL_TO",
+                     ">": "GREATER_THAN", "<": "LESS_THAN"}
             n.AST_node_type = pivots.NODE.Value(names[tok] + "_NODE")
         else:
             n.AST_node_type, n.AST_string_node_string = pivots.NODE.Value("STRING_NODE"), tok
@@ -569,11 +575,12 @@ def test_change_report():
 
     charts_file = report("issue-9")
     kinds = {c["kind"]: c for c in charts_file["changes"]}
-    assert kinds["shapes"]["title"].startswith("7 text boxes")  # text boxes were missed before
-    assert "Bubble charts" in kinds["charts"]["detail"]
+    assert list(kinds) == ["charts"] and "Bubble charts" in kinds["charts"]["detail"]
+    assert "7 text boxes" in charts_file["kept"]  # converted since v1.9
     assert any(n["kind"] == "interactive" for n in charts_file["notes"])
 
-    assert any(c["kind"] == "highlighting" for c in report("issue-66-collab")["changes"])
+    highlighted = report("issue-66-collab")
+    assert not highlighted["changes"] and "Conditional highlighting in 1 table" in highlighted["kept"]
     custom = {c["kind"]: c for c in report("test-custom-formats")["changes"]}
     assert "DURATION" in custom["formulas"]["detail"] and custom["formats"]["title"].endswith("custom number format")
     assert any(n["kind"] == "pivot-values" for n in report("test-pivot")["notes"])
@@ -610,6 +617,164 @@ def test_contents_sheet():
     assert wb[sheet.strip("'")][cell].value is not None
     plain = nt.convert(fixture("create-formulas"), os.path.join(OUT, "no-contents.xlsx"))
     assert not plain["contents"] and "Contents" not in load_workbook(os.path.join(OUT, "no-contents.xlsx")).sheetnames
+
+
+def drawings_of(path):
+    """{worksheet name: the XML of its drawing (charts, text boxes, shapes and pictures)} in a workbook."""
+    found = {}
+    with zipfile.ZipFile(path) as z:
+        names = z.namelist()
+        targets = dict(re.findall(r'Id="(rId\d+)"[^>]*Target="([^"]+)"', z.read("xl/_rels/workbook.xml.rels").decode()))
+        for name, rid in re.findall(r'<sheet name="([^"]+)" sheetId="\d+" r:id="(rId\d+)"', z.read("xl/workbook.xml").decode()):
+            rels = "xl/" + targets[rid].replace("worksheets/", "worksheets/_rels/") + ".rels"
+            drawing = re.search(r'Target="../drawings/(drawing\d+\.xml)"', z.read(rels).decode()) if rels in names else None
+            if drawing:
+                found[html.unescape(name)] = z.read("xl/drawings/" + drawing.group(1)).decode()
+    return found
+
+
+def test_text_boxes_convert():
+    # issue-9 has a text box describing the charts on each sheet, with some words in bold: Excel gets
+    # the same text, runs, font and padding, in a box that grows with its text as in Numbers.
+    result, _ = convert("issue-9")
+    assert result["drawings"] == 7 and result["unsupported"]["shapes"] == 0
+    xml = drawings_of(os.path.join(OUT, "issue-9.xlsx"))["Column and Bar Charts"]
+    (box,) = re.findall(r"<xdr:sp .*?</xdr:sp>", xml, re.S)
+    assert 'txBox="1"' in box and "<a:spAutoFit/>" in box and 'lIns="50800"' in box  # Numbers' 4 pt padding
+    runs = re.findall(r'<a:r><a:rPr [^>]*b="(\d)"[^>]*>.*?<a:t>([^<]*)</a:t>', box, re.S)
+    assert runs[:3] == [("1", "Column "), ("0", "and "), ("1", "bar")]
+    assert 'sz="1400"' in box and 'typeface="Arial"' in box  # 14 pt Helvetica Neue, as Windows has it
+    assert len(re.findall(r"<xdr:graphicFrame", xml)) == 2  # the charts are still there
+    # The table moved to column A, so the text box (left of it in Numbers) goes right of it, as a chart would.
+    ws = next(ws for ws in nt.load(fixture("issue-9")).layout().sheets if ws.name == "Column and Bar Charts")
+    (d, (x, y)), = ws.drawings
+    assert d.kind == "text" and x > ws.rect(ws.tables[0])[2] * layout.PT_TO_PX and y == 30
+
+    sheets = {s["name"]: s for s in nt.preview(fixture("issue-9"))["sheets"]}
+    (shown,) = sheets["Column and Bar Charts"]["drawings"]
+    assert shown["kind"] == "text" and shown["anchor"] == "t" and (shown["x"], shown["y"]) == (x, y)
+    text, style = shown["paragraphs"][0]["runs"][0]
+    assert text == "Column " and style["b"] and style["font"] == "Arial" and style["size"] == 14
+
+    # Laid out as in Numbers, a table whose text box sat left of it keeps it there.
+    options = {"default": "sheet"}
+    ws = next(ws for ws in nt.load(fixture("issue-9")).layout(options).sheets if ws.name == "Bubble Chart")
+    assert ws.tables[0].col == 1 and ws.drawings[0][1][0] == 0
+
+
+def test_room_for_drawings():
+    # A text box or picture above (or left of) everything else gets room, as charts do; one just a
+    # little above doesn't move anything.
+    table = layout.Footprint(None, (0.0, 130.0), [(20, False)], [(50, False)], None)
+    title = SimpleNamespace(frame=(0.0, 0.0, 540.0, 40.0))
+    assert layout.corner([table], [], [title]) == (0.0, 0.0)
+    near = SimpleNamespace(frame=(0.0, 126.0, 100.0, 20.0))
+    assert layout.corner([table], [], [near]) == (0.0, 130.0)
+    chart = SimpleNamespace(frame=(10.0, 60.0, 100.0, 50.0))
+    assert layout.corner([table], [chart], []) == (0.0, 54.0)
+    assert layout.corner([], [], [title]) == (0.0, 0.0)  # a sheet with only a text box
+
+
+def test_images_convert():
+    # images.numbers (made by tools/make_images_fixture.py, as no sample from Numbers has pictures)
+    # has a picture with a border, one cropped by a rounded mask, one saved as TIFF (Excel gets the
+    # preview Numbers keeps) and one as HEIC (no preview, so it's reported), a group holding a
+    # picture and an oval, and a rounded rectangle turned 30 degrees.
+    result, _ = convert("images")
+    assert result["drawings"] == 6 and result["unsupported"] == {"charts": 0, "images": 1, "shapes": 0, "pivots": 0}
+    path = os.path.join(OUT, "images.xlsx")
+    xml = drawings_of(path)["Sheet 1"]
+    pictures = re.findall(r"<xdr:pic>.*?</xdr:pic>", xml, re.S)
+    assert len(pictures) == 4
+    assert '<a:ln w="25400">' in pictures[0]  # the 2 pt border
+    assert 'descr="A sunrise"' in pictures[0] and "<a:hlinkClick" in pictures[0]  # its description and link
+    assert '<a:srcRect l="25000" t="25000" r="25000" b="25000"/>' in pictures[1] and "<a:custGeom>" in pictures[1]
+    shapes = re.findall(r"<xdr:sp .*?</xdr:sp>", xml, re.S)
+    turned = next(s for s in shapes if "Turned" in s)
+    assert 'rot="19800000"' in turned  # 30 degrees anticlockwise in Numbers is 330 clockwise in Excel
+    oval = next(s for s in shapes if "Grouped" in s)
+    assert oval.count("<a:cubicBezTo>") == 4 and "<a:solidFill>" in oval
+    with zipfile.ZipFile(path) as z:
+        assert len([n for n in z.namelist() if n.startswith("xl/media/")]) == 4
+
+    ws = nt.load(fixture("images")).layout().sheets[0]
+    placed = {d.name or d.image_name: position for d, position in ws.drawings}
+    assert placed["Grouped.png"] == (0, 200) and placed["Grouped"] == (107, 200)  # where their group is
+    preview = nt.preview(fixture("images"))
+    assert [c["kind"] for c in preview["report"]["changes"]] == ["images"]
+    assert "2 shapes and 4 images" in preview["report"]["kept"]
+    pictures = [d for d in preview["sheets"][0]["drawings"] if d["kind"] == "image"]
+    assert all(d["src"].startswith("data:image/png;base64,") for d in pictures) and pictures[1]["crop"] == [0.25] * 4
+    budget = [10]  # too little for any picture: they're drawn as placeholders
+    assert "src" not in drawings.describe(ws.drawings[0][0], (0, 0), budget)
+
+
+def test_shape_outlines():
+    # Numbers stretches a bezier outline to the shape's natural size, whatever size it was drawn at.
+    d = drawings.Drawing(1, "shape")
+    line = TSD.PathSourceArchive(bezier_path_source={"naturalSize": {"width": 540, "height": 0}, "path": {"elements": [
+        {"type": 1, "points": [{"x": 0, "y": 0}]}, {"type": 2, "points": [{"x": 501, "y": 0}]}]}})
+    assert drawings.read_outline(d, line) == (540, 0) and d.outline == "line"
+    assert drawings.line_frame(d, (10.0, 20.0, 540.0, 0.0)) == (10.0, 20.0, 540.0, 0.0)
+    box = TSD.PathSourceArchive(bezier_path_source={"naturalSize": {"width": 300, "height": 50}, "path": {"elements": [
+        {"type": 1, "points": [{"x": 0, "y": 0}]}, {"type": 2, "points": [{"x": 100, "y": 0}]},
+        {"type": 2, "points": [{"x": 100, "y": 100}]}, {"type": 2, "points": [{"x": 0, "y": 100}]},
+        {"type": 5}, {"type": 1, "points": [{"x": 0, "y": 0}]}]}})
+    drawings.read_outline(d, box)
+    assert d.outline == "rect"
+    star = TSD.PointPathSourceArchive(type=100, point={"x": 5, "y": 0.5}, naturalSize={"width": 100, "height": 100})
+    path, size = drawings.point_path(star)
+    assert size == (100, 100) and [cmd for cmd, _ in path] == ["M"] + ["L"] * 9 + ["Z"]
+    assert [round(v, 6) for v in path[0][1][0]] == [50, 0]  # the top point
+    rounded = TSD.ScalarPathSourceArchive(type=0, scalar=10, naturalSize={"width": 100, "height": 40})
+    assert [cmd for cmd, _ in drawings.scalar_path(rounded)[0]].count("C") == 4
+    bubble = TSD.CalloutPathSourceArchive(natural_size={"width": 100, "height": 40}, tail_position={"x": 20, "y": 70},
+                                          tail_size=10, corner_radius=5)
+    path, _ = drawings.callout_path(bubble)
+    assert ("L", [(20, 70)]) in path  # the tail's tip, below the box
+
+
+def test_highlighting_converts():
+    # issue-66-collab colours negative numbers red: Excel gets the same rule on the same cells.
+    _, wb = convert("issue-66-collab")
+    areas = lambda cf: " ".join(sorted(str(r) for r in cf.sqref.ranges))  # noqa: E731
+    (rules,) = wb["Credit"].conditional_formatting
+    assert areas(rules) == "B10:E15 E9"
+    (rule,) = rules.rules
+    assert (rule.type, rule.operator, rule.formula, rule.stopIfTrue) == ("cellIs", "lessThan", ["0"], None)
+    assert rule.dxf.font.color.rgb == "FFFF0000"
+
+    # Other kinds of rule, in the order Numbers tries them; Excel stops at the first that matches, as
+    # Numbers does. One Excel can't calculate is left out and reported.
+    book = nt.load(fixture("issue-66-collab"))
+    found = next(iter(book.highlights.values()))
+    key = next(iter(found.sets))
+    cell = found.sets[key][0]["nodes"][0]  # LINKED_CELL_REF_NODE: the cell being tested
+    found.sets[key] = [{"nodes": [cell] + rpn("Done", "="), "style": {"b": 1}},
+                       {"nodes": [cell] + rpn("ISBLANK/1"), "style": {"bg": "#FFFF00"}},
+                       {"nodes": [cell] + rpn(600, ">"), "style": {"color": "#0000FF"}},
+                       {"nodes": [cell] + rpn("STOCK/1"), "style": {"i": 1}}]
+    book.layouts.clear()
+    try:
+        out = os.path.join(OUT, "highlights.xlsx")
+        nt.convert(fixture("issue-66-collab"), out)
+        rules = sorted((rule.priority, areas(cf), rule.type, rule.operator, rule.formula, rule.stopIfTrue)
+                       for cf in load_workbook(out)["Credit"].conditional_formatting for rule in cf.rules)
+        assert rules == [(1, "B10:E15 E9", "cellIs", "equal", ['"Done"'], True),
+                         (2, "E9", "expression", None, ["ISBLANK(E9)"], True),
+                         (3, "B10:E15", "expression", None, ["ISBLANK(B10)"], True),
+                         (4, "B10:E15 E9", "cellIs", "greaterThan", ["600.0"], True)]
+        report = nt.preview(fixture("issue-66-collab"))
+        assert [c["kind"] for c in report["report"]["changes"]] == ["highlighting"]
+        # The preview shows what "Cell Value" rules highlight: B10 holds 629.
+        sheet = report["sheets"][0]
+        _, style, *_ = sheet["rows"][9][1]
+        assert sheet["styles"][style]["color"] == "#0000FF"
+    finally:
+        nt._cache.clear()
+    assert highlights.matches("<", None, "0") is False and highlights.matches("<=", None, "0")  # a blank cell is 0
+    assert highlights.matches("==", "done", '"Done"') and highlights.matches(">", "text", "100")
+    assert highlights.blocks([(8, 4)] + [(r, c) for r in range(9, 15) for c in range(1, 5)]) == [(8, 4, 8, 4), (9, 1, 14, 4)]
 
 
 if __name__ == "__main__":

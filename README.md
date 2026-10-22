@@ -28,10 +28,10 @@ gh attestation verify NumbersConverter-Setup-x.y.z.exe --repo silent-diffusion/n
 
 ## Use
 
-- Drag `.numbers` files onto the window, or click **Choose files** (Ctrl+O). Each file opens in a preview of its sheets, cells, formatting and charts as they'll be in Excel. Files a Mac saved as a *package* (a folder ending in `.numbers`) can be dragged in too, or opened with **Open a Mac package folder**.
+- Drag `.numbers` files onto the window, or click **Choose files** (Ctrl+O). Each file opens in a preview of its sheets, cells, formatting, charts, text boxes and images as they'll be in Excel. Files a Mac saved as a *package* (a folder ending in `.numbers`) can be dragged in too, or opened with **Open a Mac package folder**.
 - Before you save, the button beside **Convert & save** says whether the file **converts fully** or how many **changes** to check. It opens **What changes in Excel**, which lists:
   - formulas that keep their last value, with why and in which cells (**Show** jumps to each one);
-  - things that aren't converted yet, such as text boxes, images and conditional highlighting;
+  - things that can't be converted, such as bubble charts, pictures in a format Excel can't show, or highlighting rules Excel can't calculate;
   - smaller differences, such as Mac fonts Windows doesn't have.
 - Click **Convert & save** (Ctrl+S) to save an `.xlsx` next to the original, or in a folder you choose in Settings. Existing files are never overwritten: you get `Budget (1).xlsx` instead. **Convert all** (Ctrl+Shift+S) saves every file that's ready.
 - **Settings** (the gear at the top right, or Ctrl+,):
@@ -57,8 +57,11 @@ Each Numbers table becomes an Excel sheet (with the table's name in a title row 
 - **Pivot tables** — newer versions of Numbers don't save pivot totals in the file, so the app recalculates them from the pivot's rules and its source data (grouping by value, date part, etc.; sum, average, count, minimum, maximum). Pivot results are saved as values, not as an Excel pivot table. Any pivot it can't reproduce exactly (e.g. "show as percentage" or running totals) is reported and its totals are left blank rather than guessed.
 
 - **Charts** — column, bar, stacked, line, area, pie, donut, scatter, radar, 2-axis and mixed charts become real Excel charts that read the converted cells, so they update when the data changes. Each keeps its place beside, above or below its table (rows are added above a table to make room for charts over it, as Apple's own export does), its colours, title, legend, gaps, value labels, axis titles and gridlines. The preview shows them where they'll be. 3D charts come out flat, and interactive charts show all their data sets at once. Bubble charts aren't converted yet; the app tells you when a file has one.
+- **Text boxes and shapes** — titles, notes and drawings keep their text (paragraphs, fonts, bold/italic/coloured words, alignment, spacing, bullets and numbering, padding), fill, border and line, and their outline: rectangles, rounded rectangles, ovals, lines, arrows, stars, polygons, speech bubbles and freehand shapes, turned and flipped as in Numbers, including inside groups. They keep their place as charts do; a title or note above a table gets room made above it, as in Apple's own export.
+- **Images** — pictures keep their place, size, crop (including rounded or oval masks), border, transparency, description and link. For a picture Excel can't show (HEIC, TIFF or PDF), the app uses the preview Numbers keeps of it where there is one. A video shows its poster frame.
+- **Conditional highlighting** — each rule becomes an Excel conditional formatting rule on the same cells, with the same text colour, fill, bold, italic, underline or strikethrough: comparisons with a value as "Cell Value" rules, anything else Excel can calculate as formula rules. As in Numbers, the first rule a cell matches is the one that applies.
 
-Not carried over yet: **images, shapes and text boxes**, conditional highlighting, and the grouped view of tables with categories (their rows come out in their original order). When a file has any of these, **What changes in Excel** says so before you save.
+Not carried over yet: the grouped view of tables with categories (their rows come out in their original order), bubble charts, pictures Excel can't show that have no preview, and the occasional highlighting rule Excel can't calculate. When a file has any of these, **What changes in Excel** says so before you save.
 
 Password-protected files ask for the password and show its hint; the password is only kept in memory while the app is open.
 
@@ -87,8 +90,9 @@ Numbers Converter does all of its work on your PC.
 The window is plain HTML, CSS and JavaScript in [`src/renderer`](src/renderer), and the Electron main process is
 [`src/main.js`](src/main.js). The Numbers reader and Excel writer is a Python helper
 ([`py/numbers_tool.py`](py/numbers_tool.py), which also works out the "What changes in Excel" report, with pivot
-recalculation in [`py/pivots.py`](py/pivots.py), charts in [`py/charts.py`](py/charts.py) and sheet layout in
-[`py/layout.py`](py/layout.py), built on
+recalculation in [`py/pivots.py`](py/pivots.py), charts in [`py/charts.py`](py/charts.py), text boxes, shapes and
+images in [`py/drawings.py`](py/drawings.py), conditional highlighting in [`py/highlights.py`](py/highlights.py) and
+sheet layout in [`py/layout.py`](py/layout.py), built on
 [numbers-parser](https://github.com/masaccio/numbers-parser) and [XlsxWriter](https://xlsxwriter.readthedocs.io/)).
 The installer ships it as a standalone PyInstaller build, so users don't need Python.
 
@@ -107,8 +111,10 @@ npm run dist     # build the helper, then the installer and the portable zip in 
 Apple's `X.xlsx` export (File → Export To → Excel in Numbers; name exports with Numbers' other worksheet option
 `X 2.xlsx`), laid out the way that export was (a worksheet per table, or one per Numbers sheet), opens both in
 Excel, and scores how closely each cell matches: text, formulas, fonts, fills, borders, alignment, number formats,
-row heights and column widths; and each chart: its type, and the values and labels Excel reads for each series.
-Needs Windows with Excel. Pivot tables are skipped (Apple writes Excel pivot tables, laid out Excel's way).
+row heights and column widths; each chart: its type, and the values and labels Excel reads for each series; and
+each text box: its text, font and (where both lay a Numbers sheet out on one worksheet) its place, plus lines and
+other shapes. Needs Windows with Excel. Pivot tables are skipped (Apple writes Excel pivot tables, laid out Excel's
+way).
 
 ```bash
 .venv\Scripts\python tools/compare_with_apple.py path\to\folder

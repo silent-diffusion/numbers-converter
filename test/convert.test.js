@@ -48,6 +48,11 @@ const fixture = (name) => path.join(__dirname, 'fixtures', `${name}.numbers`);
   assert.strictEqual(charts.sheets.reduce((n, s) => n + s.charts.length, 0), 10);
   const withCharts = await convertFile(fixture('issue-9'), outDir);
   assert.strictEqual(withCharts.charts, 10);
+  // So do text boxes, shapes and pictures.
+  assert.strictEqual(charts.sheets.reduce((n, s) => n + s.drawings.length, 0), 7);
+  assert.strictEqual(withCharts.drawings, 7);
+  const pictures = await previewFile(fixture('images'));
+  assert.ok(pictures.sheets[0].drawings.some((d) => d.kind === 'image' && d.src.startsWith('data:image/png;base64,')));
 
   // A Numbers sheet with several tables: a worksheet per table, or one laid out as in Numbers,
   // chosen for all sheets or sheet by sheet.

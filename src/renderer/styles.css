@@ -72,8 +72,8 @@ h1, h2, p { margin: 0; }
 [hidden] { display: none !important; }
 .fill { flex: 1 1 auto; }
 
-/* Icons: thin strokes in the text colour (chart drawings style themselves). */
-svg:not(.chart) {
+/* Icons: thin strokes in the text colour (charts and shapes in the preview style themselves). */
+svg:not(.chart):not(.outline) {
   flex-shrink: 0;
   fill: none;
   stroke: currentColor;
@@ -81,7 +81,7 @@ svg:not(.chart) {
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-svg:not(.chart) .dot { fill: currentColor; stroke: none; }
+svg:not(.chart):not(.outline) .dot { fill: currentColor; stroke: none; }
 .ic { display: inline-flex; flex-shrink: 0; }
 
 :focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
@@ -411,6 +411,26 @@ body.dragging .drop-card { border-color: var(--accent); background: var(--accent
 .sheet-area { position: relative; width: max-content; min-width: 100%; min-height: 100%; }
 .chart-layer { position: absolute; left: 12px; top: 12px; pointer-events: none; }
 .chart-layer .chart { position: absolute; overflow: visible; }
+/* Text boxes, shapes and pictures (see drawings.js). Excel doesn't cut off text that overflows its box. */
+.drawing { position: absolute; box-sizing: border-box; }
+.drawing .outline { position: absolute; left: 0; top: 0; overflow: visible; }
+.drawing .text { position: absolute; inset: 0; display: flex; flex-direction: column; color: #000; }
+.drawing .text.ctr { justify-content: center; }
+.drawing .text.b { justify-content: flex-end; }
+.drawing .text p { margin: 0; white-space: pre-wrap; overflow-wrap: break-word; }
+.drawing .text .bullet { display: inline-block; min-width: 1.2em; margin-left: -1.2em; }
+.drawing .crop { position: absolute; inset: 0; overflow: hidden; }
+.drawing .crop img { position: absolute; max-width: none; }
+.drawing .crop.missing {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f1f1f3;
+  border: 1px dashed #b5b5bb;
+  color: var(--text-2);
+  font-size: 12px;
+  text-align: center;
+}
 
 .preview-note { flex: 0 0 auto; padding: 6px 16px; border-top: 1px solid var(--stroke); font-size: 12px; line-height: 16px; color: var(--text-2); }
 
