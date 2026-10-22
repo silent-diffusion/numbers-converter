@@ -1,0 +1,19 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
+
+PackageIdentifier: SilentDiffusion.NumbersConverter
+PackageVersion: 1.8.0
+InstallerType: nullsoft
+Scope: user
+InstallerSwitches:
+  Upgrade: --updated
+UpgradeBehavior: install
+FileExtensions:
+- numbers
+ProductCode: 6996ad0a-a27f-5f63-a7b5-6d528f8e204f
+ReleaseDate: 2026-10-21
+Installers:
+- Architecture: x64
+  InstallerUrl: https://github.com/silent-diffusion/numbers-converter/releases/download/v1.8.0/NumbersConverter-Setup-1.8.0.exe
+  InstallerSha256: 01346346383AC175234D471CC056902E2EC358CC4DDB381A01B7929EA382C8ED
+ManifestType: installer
+ManifestVersion: 1.12.0

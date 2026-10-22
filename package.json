@@ -6,7 +6,7 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "test": ".venv\\Scripts\\python -W ignore py/test_numbers_tool.py && node test/convert.test.js",
+    "test": ".venv\\Scripts\\python -W ignore py/test_numbers_tool.py && node test/convert.test.js && node test/updater.test.js",
     "build:helper": ".venv\\Scripts\\pyinstaller --noconfirm --onedir --name numbers-tool --distpath py/dist --workpath py/build --specpath py/build --collect-submodules numbers_parser --collect-data numbers_parser --exclude-module numpy --exclude-module openpyxl --exclude-module tkinter py/numbers_tool.py",
     "dist": "npm run build:helper && electron-builder --win --publish never"
   },
@@ -52,8 +52,12 @@
       }
     ],
     "win": {
-      "target": "nsis",
-      "icon": "build/icon.png"
+      "target": [
+        "nsis",
+        "zip"
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "NumbersConverter-${version}-win-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": true,

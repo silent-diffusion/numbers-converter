@@ -1,0 +1,32 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.12.0.schema.json
+
+PackageIdentifier: SilentDiffusion.NumbersConverter
+PackageVersion: 1.8.0
+PackageLocale: en-US
+Publisher: silent-diffusion
+PublisherUrl: https://github.com/silent-diffusion
+PublisherSupportUrl: https://github.com/silent-diffusion/numbers-converter/issues
+PrivacyUrl: https://github.com/silent-diffusion/numbers-converter#privacy
+Author: silent-diffusion
+PackageName: Numbers Converter
+PackageUrl: https://github.com/silent-diffusion/numbers-converter
+License: MIT
+LicenseUrl: https://github.com/silent-diffusion/numbers-converter/blob/main/LICENSE
+Copyright: Copyright (c) 2026 silent-diffusion
+ShortDescription: Convert Apple Numbers spreadsheets to Excel, offline.
+Description: |-
+  Numbers Converter turns Apple Numbers (.numbers) files into Excel (.xlsx) workbooks on your PC, with no Mac and no upload.
+  It keeps values, table styles, formatting, number formats, comments, links, form controls and filters, rewrites formulas as Excel formulas, recalculates pivot tables, and turns charts into real Excel charts.
+  A preview shows each sheet as it will be in Excel, and before you save, the app lists anything that will come out differently.
+Moniker: numbers-converter
+Tags:
+- apple-numbers
+- converter
+- excel
+- iwork
+- numbers
+- spreadsheet
+- xlsx
+ReleaseNotesUrl: https://github.com/silent-diffusion/numbers-converter/releases/tag/v1.8.0
+ManifestType: defaultLocale
+ManifestVersion: 1.12.0
