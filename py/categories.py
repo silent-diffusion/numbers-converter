@@ -32,6 +32,9 @@ FUNCTIONS = {
 }
 FUNCTION_BY_CODE = {2: "sum"}
 UNKNOWN = "?"  # a summary whose code isn't in FUNCTION_BY_CODE
+# The line a grouped table has under its header rows and above each group's row (and label row):
+# Numbers draws it heavier than the table's own lines, and Apple's export writes it medium, in black.
+SEPARATOR = (1.5, "#000000", "solid")
 
 
 class Level:
@@ -316,15 +319,16 @@ def saved_results(table, summary_model, column_of, tools):
 def edges(grouping, horizontal, header_rows, footer_rows, num_rows):
     """Lines across the grouped view, from the table's own (horizontal[y][c] runs along the top of
     table row y; see strokes.table_lines): a list per column for the top of each view row, plus one
-    for the bottom of the table. Header and footer rows keep theirs. A group's row, and a label row,
-    gets the line under the header rows above it, as Numbers draws it and Apple's export writes it
-    (none between a label row and the group under it); a group's own rows are divided by the
-    body's lines."""
+    for the bottom of the table. Header and footer rows keep theirs. Under the header rows and
+    above each group's row and label row goes the SEPARATOR, as Numbers draws it and Apple's export
+    writes it (none between a label row and the group under it); under a group's row, the table's
+    own line under its header rows; and between a group's rows, the body's lines."""
     rows = grouping.rows
     columns = len(horizontal[0])
-    separator = horizontal[header_rows] if header_rows else horizontal[0]
+    separator = [SEPARATOR] * columns
     inner_row = header_rows + 1
     inner = horizontal[inner_row] if inner_row < num_rows - footer_rows else [None] * columns
+    under_group = horizontal[header_rows] if header_rows else inner
 
     def region(i):
         kind, item = rows[i]
@@ -348,7 +352,7 @@ def edges(grouping, horizontal, header_rows, footer_rows, num_rows):
         elif below in ("group", "label"):
             out.append(separator)
         elif above in ("group", "label"):
-            out.append(inner)
+            out.append(under_group)
         else:  # two rows in a group: their own line where they're neighbours in the table too
             out.append(horizontal[rows[i][1]] if rows[i][1] == rows[i - 1][1] + 1 else inner)
     out.append(horizontal[num_rows])
