@@ -705,10 +705,14 @@ function applyStyle(td, s) {
   if (s.size) st.fontSize = `${s.size * PT_TO_PX}px`;
   if (s.font) st.fontFamily = `"${s.font}", Arial, sans-serif`;
   if (s.ha) st.textAlign = s.ha;
+  if (s.ind) st.paddingLeft = `${5 + s.ind * 12}px`; // Excel's indent: about three characters a level
   if (s.va) st.verticalAlign = s.va;
   if (s.wrap) { st.whiteSpace = 'pre-wrap'; st.wordBreak = 'break-word'; }
   for (const [key, side] of [['bt', 'Top'], ['br', 'Right'], ['bb', 'Bottom'], ['bl', 'Left']]) {
-    if (!s[key]) continue;
+    if (!s[key]) {
+      if (s.bg) st[`border${side}Color`] = s.bg; // no line: the fill runs to the edge, as in Excel
+      continue;
+    }
     const [width, color, kind] = s[key];
     st[`border${side}`] = `${Math.max(1, Math.round(width * PT_TO_PX))}px ${BORDER_STYLES[kind] || 'solid'} ${color}`;
   }

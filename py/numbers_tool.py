@@ -26,13 +26,14 @@ import xlsxwriter.exceptions
 from numbers_parser import Document
 from xlsxwriter.utility import xl_range_abs
 
+import categories
 import charts
 import drawings
 import extras
 import highlights
 import pivots
 import strokes
-from layout import SHEET, TABLES, Footprint, Layout
+from layout import SHEET, TABLES, Footprint, Layout, spans
 from numbers_parser.cell import (
     RGB,
     BoolCell,
@@ -325,6 +326,15 @@ class Book:
                 self.pivot_values[table._table_id] = pivot.values
                 if pivot.missing:
                     self.unsupported["pivots"] += 1
+        self.groupings = {}  # {table_id: categories.Grouping} for tables grouped into categories
+        for _, table in self.tables:
+            try:
+                view = categories.read(table, CATEGORY_TOOLS)
+            except Exception:  # categories.Unsupported, or something unexpected: the rows keep their order
+                self.unsupported["categories"] = self.unsupported.get("categories", 0) + 1
+                continue
+            if view is not None:
+                self.groupings[table._table_id] = view
         self.layouts = {}
 
     def layout(self, options=None):
@@ -340,15 +350,40 @@ class Book:
 CHART_TOOLS = SimpleNamespace(text=lambda cell: "" if isinstance(cell, (EmptyCell, MergedCell)) else formatted(cell).strip(),
                               font=lambda name: font_name(name), bold=lambda name: font_is_bold(name),
                               number_format=lambda cell: excel_number_format(cell))
+# And what categories.py needs: a cell's text, its value as Excel stores a number (None for text
+# and blanks) and its number format, whether it holds anything, and a table's hidden rows.
+CATEGORY_TOOLS = SimpleNamespace(
+    text=CHART_TOOLS.text,
+    number=lambda cell: cached_value(cell) if is_numeric(cell) else None,
+    number_format=lambda cell: excel_number_format(cell) if is_numeric(cell) else None,
+    filled=lambda cell: not isinstance(cell, (EmptyCell, MergedCell)) and cell.value not in (None, ""),
+    hidden=lambda table: extras.hidden(table, columns=False))
 
 
 def footprint(book, table):
     """A table as the layout sees it: its position on its Numbers sheet, and its rows (its title row
-    first, if Numbers shows its name) and columns as they're written out."""
+    first, if Numbers shows its name) and columns as they're written out. A table grouped into
+    categories has its rows in display order with its group and label rows among them, and its
+    category column first."""
     title = book.titles[table._table_id]
+    view = book.groupings.get(table._table_id)
     hidden_rows, hidden_cols = extras.hidden(table, columns=False), extras.hidden(table, columns=True)
-    rows = [(height, r in hidden_rows) for r, height in enumerate(header_sizes(table, columns=False))]
+    heights = header_sizes(table, columns=False)
+    if view is None:
+        rows = [(height, r in hidden_rows) for r, height in enumerate(heights)]
+    else:
+        default = table._model.objects[table._table_id].default_row_height or 20.0
+        rows = []
+        for i, (kind, item) in enumerate(view.rows):
+            if kind == "row":
+                rows.append((heights[item], item in hidden_rows))
+            elif kind == "group":
+                rows.append((view.levels[item.level - 1].height or default, item.hidden()))
+            else:  # a label row, hidden along with the group under it
+                rows.append((item.label_height or default, view.rows[i + 1][1].hidden()))
     cols = [(max(6.0, width), c in hidden_cols) for c, width in enumerate(header_sizes(table, columns=True))]
+    if view is not None:
+        cols.insert(0, (view.width, False))
     if title:
         rows.insert(0, (title_height(title), False))
     try:
@@ -356,7 +391,7 @@ def footprint(book, table):
         position = (g.position.x, g.position.y)
     except Exception:
         position = (0.0, 0.0)
-    return Footprint(table, position, rows, cols, title)
+    return Footprint(table, position, rows, cols, title, view)
 
 
 def table_title(table):
@@ -744,6 +779,182 @@ def is_numeric(cell):
     return isinstance(cell, (NumberCell, DateCell, DurationCell))
 
 
+# ---------------------------------------------------------------- tables grouped into categories
+
+
+def part_style(model, cell_style_id, text_style_id):
+    """A style dict (as cell_style gives) from a table's own styles for a part of it: a category
+    level's group rows, its label row, the header column."""
+    s = {}
+    try:
+        props = model.objects[cell_style_id].cell_properties
+        if props.cell_fill.HasField("color"):
+            s["bg"] = rgb_hex(rgb_from_proto(props.cell_fill.color))
+        s["va"] = {1: "middle", 2: "bottom"}.get(props.vertical_alignment, "top")
+        if props.text_wrap:
+            s["wrap"] = 1
+    except Exception:
+        pass
+    try:
+        style = model.objects[text_style_id]
+        font = model.char_property(style, "font_name")
+        note_font(model, font)
+        name = font_name(font)
+        if name and name != "Arial":
+            s["font"] = name
+        size = model.char_property(style, "font_size")
+        if size and abs(size - 10) > 0.01:
+            s["size"] = round(size, 1)
+        if model.char_property(style, "bold"):
+            s["b"] = 1
+        if model.char_property(style, "italic"):
+            s["i"] = 1
+        colour = rgb_hex(rgb_from_proto(model.char_property(style, "font_color")))
+        if colour and colour != "#000000":
+            s["color"] = colour
+    except Exception:
+        pass
+    return s
+
+
+_view_lines = {}
+
+
+def view_lines(table, view):
+    """(lines across the grouped view per its rows, the table's vertical lines; see
+    categories.edges and strokes.table_lines), worked out once per table; None if unreadable."""
+    key = (id(table._model), table._table_id)
+    if key not in _view_lines:
+        try:
+            tm = table._model.objects[table._table_id]
+            horizontal, vertical = strokes.table_lines(table._model, table._table_id)
+            across = categories.edges(view, horizontal, tm.number_of_header_rows, tm.number_of_footer_rows, table.num_rows)
+            _view_lines[key] = (across, vertical)
+        except Exception:
+            _view_lines[key] = None
+    return _view_lines[key]
+
+
+def set_lines(style, top, bottom, left=False, right=False):
+    """Puts lines into a style dict, None removing one; left and right only when given."""
+    for key, line in (("bt", top), ("bb", bottom), ("bl", left), ("br", right)):
+        if line is False:
+            continue
+        if line is None:
+            style.pop(key, None)
+        else:
+            style[key] = list(line)
+    return style
+
+
+def grouped_style(placed, cell, style):
+    """A grouped table's cell keeps its own style, but the lines above and below it are those of its
+    neighbours in the grouped view, which aren't its neighbours in the table."""
+    lines = view_lines(placed.table, placed.view)
+    if lines is None:
+        return style
+    i = placed.view.at[cell.row]
+    across = lines[0]
+    return set_lines(style, across[i][cell.col], across[i + 1][cell.col])
+
+
+def grouped_cells(placed):
+    """The cells a table grouped into categories adds on its worksheet (see categories): the category
+    column beside every row, each group's row with its name and summaries, and the label rows.
+    [(row, column, value, style, number format, formula)] on the worksheet: the value is text or a
+    number (None for a blank cell), the formula an Excel formula giving that value, or None."""
+    table, view = placed.table, placed.view
+    model = table._model
+    tm = model.objects[table._table_id]
+    header_rows, footer_rows = tm.number_of_header_rows, tm.number_of_footer_rows
+    lines = view_lines(table, view)
+    across, vertical = lines if lines else (None, None)
+    # Group and label rows run across the header column without its separator, as header rows do.
+    inserted_vertical = vertical[0] if vertical else None
+    header_column = part_style(model, tm.header_column_style.identifier, tm.header_column_text_style.identifier)
+    styles = {}
+
+    def level_style(kind, level):
+        key = (kind, level)
+        if key not in styles:
+            n = min(level, 5)
+            styles[key] = part_style(model, getattr(tm, f"{kind}_level_{n}_style").identifier,
+                                     getattr(tm, f"{kind}_level_{n}_text_style").identifier)
+        return styles[key]
+
+    out = []
+    for i, (kind, item) in enumerate(view.rows):
+        row = placed.row + i
+        verticals = vertical[item] if kind == "row" and vertical else inserted_vertical
+
+        def lined(style, c):
+            if across is None:
+                return style
+            left = verticals[c] if c >= 0 else verticals[0]
+            right = verticals[c + 1] if c >= 0 else verticals[0]
+            return set_lines(dict(style), across[i][max(c, 0)], across[i + 1][max(c, 0)], left, right)
+
+        if kind == "row":
+            if item < header_rows or item >= table.num_rows - footer_rows:  # looks like the row's first cell
+                base = {k: v for k, v in cell_style(table._data[item][0]).items() if k not in ("bt", "bb", "bl", "br", "ha")}
+            else:
+                base = header_column
+            out.append((row, placed.col, None, lined(base, -1), None, None))
+            continue
+        if kind == "label":
+            base = level_style("label", item.number)
+            out.append((row, placed.col, f"{item.header}:" if item.header else None, lined(base, -1), None, None))
+            for c in range(table.num_cols):
+                function = item.summaries.get(c, False)
+                text = f"{categories.FUNCTIONS[function][0]}:" if function else None
+                style = lined({**base, "ha": "right"} if function is not False else base, c)
+                out.append((row, placed.sheet_col(c), text, style, None, None))
+            continue
+        group = item
+        base = level_style("category", group.level)
+        name_style = lined({**base, "ind": group.level - 1} if group.level > 1 else base, -1)
+        out.append((row, placed.col, group.name, name_style, None, None))
+        for c in range(table.num_cols):
+            style = lined(base, c)
+            if c not in group.summaries:
+                out.append((row, placed.sheet_col(c), None, style, None, None))
+                continue
+            function, value, saved = group.summaries[c]
+            num_format = summary_format(table, group, c, function, saved)
+            formula = summary_formula(placed, group, c, function)
+            if not function:  # no function we can name: Numbers' result as it is
+                value = saved[0] if saved else None
+            out.append((row, placed.sheet_col(c), value, style, num_format, formula))
+    return out
+
+
+def summary_formula(placed, group, column, function):
+    """The Excel formula for a group's summary: its function over the group's cells in the column,
+    as runs of rows (a group with groups inside it skips their rows), or None."""
+    if not function or not group.rows:
+        return None
+    runs = spans(placed.sheet_row(r) for r in group.rows)
+    if len(runs) > 200:  # Excel takes at most 255 arguments
+        return None
+    letters = column_letters(placed.sheet_col(column))
+    areas = [f"{letters}{a + 1}" if a == b else f"{letters}{a + 1}:{letters}{b + 1}" for a, b in runs]
+    return f"={categories.FUNCTIONS[function][1]}({','.join(areas)})"
+
+
+def summary_format(table, group, column, function, saved):
+    """A summary's number format: the one Numbers gave the result it saved, else that of the cells
+    it sums up (but a count is a plain number)."""
+    if function in ("count", "count numbers"):
+        return None
+    if saved and saved[1]:
+        return saved[1]
+    for r in group.rows:
+        cell = table._data[r][column]
+        if is_numeric(cell):
+            return excel_number_format(cell)
+    return None
+
+
 # ---------------------------------------------------------------- preview
 
 
@@ -775,6 +986,8 @@ KEPT_REASONS = {
                   "contain dates typed as text, which Excel would read using the PC’s region settings"),
     "whole": ("refers to a whole column or row in a way Excel can’t", "refer to whole columns or rows in a way Excel can’t"),
     "pivot": ("refers to cells in a pivot table", "refer to cells in a pivot table"),
+    "category": ("refers to rows of a table grouped into categories in a way Excel can’t follow once they’re grouped",
+                 "refer to rows of tables grouped into categories in a way Excel can’t follow once they’re grouped"),
     "cross-table": ("uses a range that spans two tables", "use ranges that span two tables"),
     "missing": ("refers to a table or header name that isn’t in the Excel file",
                 "refer to tables or header names that aren’t in the Excel file"),
@@ -809,7 +1022,7 @@ def change_report(book, layout):
         return layout.report
     kept_values = {}  # reason -> {"count", "names"}
     cells = []
-    live = conditional = highlighted = grouped = captions = filtered = custom_formats = 0
+    live = conditional = highlighted = captions = filtered = custom_formats = 0
     for sheet_name, table in book.tables:
         placed = layout.place.get(table._table_id)
         if placed is None or table._model.objects[table._table_id].HasField("pivot_owner"):
@@ -838,9 +1051,8 @@ def change_report(book, layout):
                 if name:
                     entry["names"].add(name)
                 if len(cells) < REPORT_CELLS:
-                    r, c = placed.row + cell.row, placed.col + cell.col
+                    r, c = placed.cell(cell.row, cell.col)
                     cells.append({"sheet": placed.sheet, "ref": f"{column_letters(c)}{r + 1}", "row": r, "col": c})
-        grouped += safely(lambda: table.categorized_data() is not None)
         captions += safely(lambda: table.caption_enabled and table.caption.strip())
         filtered += safely(lambda: extras.filter_enabled(table))
 
@@ -898,6 +1110,20 @@ def change_report(book, layout):
         changes.append({"kind": "formats", "title": f"{counted(custom_formats, 'cell')} {'has' if custom_formats == 1 else 'have'} "
                                                     "a custom number format",
                         "detail": "Excel gets the plain number instead, because the format can’t be translated."})
+    summaries = sum(1 for view in book.groupings.values() for group in view.groups
+                    for function, _, _ in group.summaries.values() if not function)
+    if summaries:
+        one = summaries == 1
+        changes.append({"kind": "category-summaries",
+                        "title": f"{counted(summaries, 'category summary', 'category summaries')} {'keeps its' if one else 'keep their'} last value",
+                        "detail": f"This app can’t tell which calculation {'it uses' if one else 'they use'}, so the "
+                                  f"{'result Numbers calculated is' if one else 'results Numbers calculated are'} saved instead. "
+                                  f"{'It' if one else 'They'} won’t update when the data changes."})
+    unread = u.get("categories", 0)
+    if unread:
+        changes.append({"kind": "categories", "title": f"{counted(unread, 'table')} {'is' if unread == 1 else 'are'} grouped "
+                                                       "in a way this app can’t read",
+                        "detail": "Excel gets every row in its original order, without the group rows and their summaries."})
     shown = {ws.numbers_sheet for ws in layout.sheets}
     dropped = [name for _, name, _ in book.sheets if name not in shown]
     if dropped:
@@ -922,9 +1148,6 @@ def change_report(book, layout):
         notes.append({"kind": "interactive", "title": f"{counted(interactive, 'interactive chart')} "
                                                       f"{'shows' if interactive == 1 else 'show'} every data set at once",
                       "detail": "Excel has no interactive charts, so all the data sets are drawn together."})
-    if grouped:
-        notes.append({"kind": "categories", "title": f"{counted(grouped, 'table')} {'is' if grouped == 1 else 'are'} grouped into categories",
-                      "detail": "Excel gets every row in its original order, without the group rows and their summaries."})
     if filtered:
         notes.append({"kind": "filters", "title": f"{counted(filtered, 'table')} {'has' if filtered == 1 else 'have'} filters",
                       "detail": "The rows they hide stay hidden and Excel shows filter buttons, but the filter rules aren’t carried over."})
@@ -951,6 +1174,8 @@ def change_report(book, layout):
         kept.append(drawn[0] if len(drawn) == 1 else ", ".join(drawn[:-1]) + " and " + drawn[-1])
     if live:
         kept.append(f"{counted(live, 'formula')} that {'keeps' if live == 1 else 'keep'} calculating in Excel")
+    if book.groupings:
+        kept.append(f"{counted(len(book.groupings), 'table')} grouped into categories, with each group’s row and summaries")
     kept.append("Formatting, borders and number formats")
     if highlighted:
         kept.append(f"Conditional highlighting in {counted(highlighted, 'table')}")
@@ -969,8 +1194,7 @@ def table_highlights(layout, sheet_name, table):
         def translate(text, r, c):
             return translate_formula(text, layout, sheet_name, highlights.host(table._table_id, r, c))
         try:
-            layout.highlights[table._table_id] = highlights.excel_rules(
-                rules, translate, lambda r, c: (placed.row + r, placed.col + c))
+            layout.highlights[table._table_id] = highlights.excel_rules(rules, translate, placed.cell, placed.blocks)
         except Exception:  # never let a rule stop the table converting
             layout.highlights[table._table_id] = [], sum(len(rule_list) for rule_list in rules.sets.values()) or 1
     return layout.highlights[table._table_id]
@@ -1025,23 +1249,27 @@ def preview_sheet(book, layout, ws):
             st = {"font": title["font"], "size": title["size"], "b": 1 if title["bold"] else 0,
                   "i": 1 if title["italic"] else 0, "color": title["color"], "bg": background, "ha": "center", "va": "middle"}
             grid[placed.title_row][placed.col] = [title["text"], style_index({k: v for k, v in st.items() if v})]
-            merge(placed.title_row, placed.col, placed.title_row, placed.col + table.num_cols - 1)
+            merge(placed.title_row, placed.col, placed.title_row, placed.col + placed.width - 1)
         computed = book.pivot_values.get(table._table_id, {})
         rules = {}  # highlighting rules by key, to show what they highlight as Excel will
         for rule in table_highlights(layout, book.sheet_name_of[table._table_id], table)[0]:
             rules.setdefault(rule["key"], []).append(rule)
         for r, source_row in enumerate(table_rows(table)):
-            row = placed.row + r
+            row = placed.sheet_row(r)
             if row >= rows_shown:
-                break
+                if placed.view is None:
+                    break
+                continue  # a grouped table's rows aren't in order on the sheet
             for c, cell in enumerate(source_row):
-                col = placed.col + c
+                col = placed.sheet_col(c)
                 if col >= cols_shown:
                     break
                 if isinstance(cell, MergedCell):
                     grid[row][col] = None
                     continue
                 st = cell_style(cell)
+                if placed.view is not None:
+                    st = grouped_style(placed, cell, st)
                 if getattr(cell, "_cond_style_id", None) in rules and not isinstance(cell, ErrorCell):
                     value = None if isinstance(cell, EmptyCell) else cached_value(cell) if isinstance(cell, (DateCell, DurationCell)) else cell.value
                     for key, setting in (highlights.preview_style(rules[cell._cond_style_id], value) or {}).items():
@@ -1063,7 +1291,19 @@ def preview_sheet(book, layout, ws):
                 grid[row][col] = [text, index, info] if info else ([text, index] if index else text)
         for rng in table.merge_ranges:
             r1, c1, r2, c2 = parse_range(rng)
-            merge(placed.row + r1, placed.col + c1, placed.row + r2, placed.col + c2)
+            if len(placed.runs(r1, r2)) == 1:
+                merge(*placed.cell(r1, c1), *placed.cell(r2, c2))
+        if placed.view is not None:
+            for row, col, value, st, num_format, _ in grouped_cells(placed):
+                if row >= rows_shown or col >= cols_shown:
+                    continue
+                if value is None or isinstance(value, str):
+                    text = value or ""
+                else:
+                    text = format_number(value, num_format)
+                    st = st if "ha" in st else {**st, "ha": "right"}
+                index = style_index(st)
+                grid[row][col] = [text, index] if index else text
 
     budget = [drawings.PREVIEW_PICTURE_LIMIT]  # bytes of pictures this sheet's preview may carry
     return {
@@ -1413,6 +1653,25 @@ def excel_formula(layout, sheet_name, cell):
     return layout.formulas[key]
 
 
+def place_cells(cells, placed):
+    """A reference like B2 or $A$3:C9 in a table's own rows and columns, moved to where the table
+    sits on its worksheet; None for a range whose rows don't stay together there (a grouped table's)."""
+    if placed.view is None:
+        return shift_rows(cells, placed.row, placed.col)
+    rows = [int(m.group(1)) - 1 for m in re.finditer(r"(\d+)(?=:|$)", cells)]
+    if len(rows) == 2 and len(placed.runs(min(rows), max(rows))) > 1:
+        return None
+
+    def move(m):
+        dollar, letters, row_dollar, row = m.groups()
+        col = 0
+        for ch in letters:
+            col = col * 26 + ord(ch) - 64
+        r, c = placed.cell(int(row) - 1, col - 1)
+        return f"{dollar}{column_letters(c)}{row_dollar}{r + 1}"
+    return re.sub(r"(\$?)([A-Z]{1,3})(\$?)(\d+)", move, cells)
+
+
 def shift_rows(cells, offset, columns=0):
     """Move every cell in a reference like B2 or $A$3:C9 down by `offset` rows and right by `columns`."""
     if not offset and not columns:
@@ -1452,13 +1711,20 @@ def merge_exact_ranges(formula):
     return re.sub(r"(⟦[^⟧]*⟧):(⟦[^⟧]*⟧)", merge, formula)
 
 
-def exact_reference(code, layout, own_table, cell, as_range):
+# Functions that read a union of ranges, (A1:A3,A5:A9), as the cells in it: where a range over a
+# grouped table's rows comes apart on the worksheet, they still get exactly its cells.
+UNION_FUNCTIONS = {"SUM", "AVERAGE", "COUNT", "COUNTA", "MIN", "MAX", "PRODUCT"}
+
+
+def exact_reference(code, layout, own_table, cell, as_range, function=None):
     """Excel reference for an exact reference code, or None. Whole columns (header names like
     Amount, or column letters) mean the column's body cells, without header and footer rows, when
     they're a whole function argument (SUM(Amount)); anywhere else Numbers uses the cell in the
     formula's own row (Price×Quantity), which only makes sense within the formula's own table.
     Whole rows work the same way across the body columns. Cells are placed where their table sits
-    on its worksheet, which is named when it isn't the formula's own."""
+    on its worksheet, which is named when it isn't the formula's own. A grouped table's rows may
+    not follow one another there: a range over them becomes a union of its pieces when it's a whole
+    argument of a function in UNION_FUNCTIONS (`function`), and can't be expressed elsewhere."""
     table_id, r1, r2, c1, c2, flags = EXACT.fullmatch(code).groups()
     table_id = int(table_id)
     placed = layout.place.get(table_id)
@@ -1469,7 +1735,6 @@ def exact_reference(code, layout, own_table, cell, as_range):
     if tm.HasField("pivot_owner"):
         return None  # pivot cells are laid out in display order, not the order references use
     own = layout.place.get(own_table)
-    top, left = placed.row, placed.col
     flags = int(flags)
     prefix = "" if own is not None and own.sheet == placed.sheet else "'" + placed.sheet.replace("'", "''") + "'!"
     row_abs, col_abs, row2_abs, col2_abs = ("$" if flags >> i & 1 else "" for i in range(4))
@@ -1478,26 +1743,33 @@ def exact_reference(code, layout, own_table, cell, as_range):
     c2 = c1 if c2 is None else c2
 
     def letters(c):
-        return column_letters(c + left)
+        return column_letters(placed.sheet_col(c))
+
+    def area(top, bottom, first, last, row_abs, row2_abs, col_abs, col2_abs):
+        def cells(a, b):  # worksheet rows a..b
+            start = f"{col_abs}{letters(first)}{row_abs}{a + 1}"
+            return start if (a, first) == (b, last) else f"{start}:{col2_abs}{letters(last)}{row2_abs}{b + 1}"
+        if len(placed.runs(top, bottom)) == 1:
+            return prefix + cells(placed.sheet_row(top), placed.sheet_row(bottom))
+        if as_range and function in UNION_FUNCTIONS:  # the cells' order doesn't matter to these
+            return "(" + ",".join(prefix + cells(a, b) for a, b in placed.pieces(top, bottom)) + ")"
+        return None
 
     if r1 is not None and c1 is not None:
-        start = f"{col_abs}{letters(c1)}{row_abs}{r1 + top + 1}"
-        end = f"{col2_abs}{letters(c2)}{row2_abs}{r2 + top + 1}"
-        return prefix + (start if (r1, c1) == (r2, c2) else f"{start}:{end}")
+        return area(r1, r2, c1, c2, row_abs, row2_abs, col_abs, col2_abs)
     if c1 is not None:  # whole column(s)
         first, last = tm.number_of_header_rows, table.num_rows - tm.number_of_footer_rows - 1
         if as_range and last >= first:
-            return (f"{prefix}{col_abs}{letters(c1)}{first + top + 1}:"
-                    f"{col2_abs or col_abs}{letters(c2)}{last + top + 1}")
+            return area(first, last, c1, c2, "", "", col_abs, col2_abs or col_abs)
         if not as_range and c1 == c2 and table_id == own_table and cell is not None and first <= cell.row <= last:
-            return f"{col_abs}{letters(c1)}{cell.row + top + 1}"
+            return f"{col_abs}{letters(c1)}{placed.sheet_row(cell.row) + 1}"
         return None
     if r1 is not None:  # whole row(s)
         first, last = tm.number_of_header_columns, table.num_cols - 1
         if as_range and last >= first:
-            return f"{prefix}{letters(first)}{row_abs}{r1 + top + 1}:{letters(last)}{row2_abs or row_abs}{r2 + top + 1}"
+            return area(r1, r2, first, last, row_abs, row2_abs or row_abs, "", "")
         if not as_range and r1 == r2 and table_id == own_table and cell is not None and first <= cell.col <= last:
-            return f"{letters(cell.col)}{row_abs}{r1 + top + 1}"
+            return f"{letters(cell.col)}{row_abs}{placed.sheet_row(r1) + 1}"
     return None
 
 
@@ -1598,7 +1870,7 @@ def translate_formula(formula, layout, sheet_name, cell=None, why=None):
 
     def offsets(table_id):
         placed = place.get(table_id)
-        return (placed.row, placed.col) if placed else (0, 0)
+        return (placed.row, placed.sheet_col(0)) if placed else (0, 0)
 
     out = []
     # One frame per open parenthesis: [function name or None, commas seen, any argument text seen,
@@ -1635,6 +1907,8 @@ def translate_formula(formula, layout, sheet_name, cell=None, why=None):
                     # Numbers counts rows (columns) within a table, Excel across the sheet, where
                     # the table may start further down (right): its title row, other tables.
                     target = next((int(EXACT.fullmatch(t).group(1)) for k, t in args[0] if k == "exact"), own_table)
+                    if name == "ROW" and target in place and place[target].view is not None:
+                        return kept("category")  # a grouped table's rows aren't in order on the sheet
                     shift = offsets(target)[0 if name == "ROW" else 1]
                     if shift:
                         out[at] = "(" + out[at]
@@ -1656,9 +1930,15 @@ def translate_formula(formula, layout, sheet_name, cell=None, why=None):
                 )
             if target is None or target not in place:
                 return kept("missing")
-            out.append("'" + place[target].sheet.replace("'", "''") + "'!" + shift_rows(cells, *offsets(target)))
+            moved = place_cells(cells, place[target])
+            if moved is None:
+                return kept("category")
+            out.append("'" + place[target].sheet.replace("'", "''") + "'!" + moved)
         elif kind == "ref":
-            out.append(shift_rows(text, *offsets(own_table)))
+            moved = place_cells(text, place[own_table]) if own_table in place else text
+            if moved is None:
+                return kept("category")
+            out.append(moved)
         elif kind == "func":
             name = text.rstrip("( \t")
             if name not in EXCEL_FUNCTIONS:
@@ -1675,7 +1955,7 @@ def translate_formula(formula, layout, sheet_name, cell=None, why=None):
             after = tokens[significant[position + 1]][1] if position + 1 < len(significant) else None
             opens_argument = before[0] == "func" or before[1] in ("(", ",")  # "SUM(" arrives as one token
             as_range = bool(stack and stack[-1][0]) and opens_argument and after in (",", ")")
-            excel = exact_reference(text, layout, own_table, cell, as_range) if place else None
+            excel = exact_reference(text, layout, own_table, cell, as_range, stack[-1][0] if stack else None) if place else None
             if excel is None:
                 return kept(reference_problem(text, place))
             out.append(excel)
@@ -1694,6 +1974,8 @@ def reference_problem(code, place):
         return "missing"
     if placed.table._model.objects[placed.table._table_id].HasField("pivot_owner"):
         return "pivot"
+    if placed.view is not None:
+        return "category"  # a range over a grouped table's rows that comes apart on the sheet
     return "whole"  # a whole column or row used where Excel needs cells
 
 
@@ -1727,6 +2009,8 @@ class FormatCache:
             props["text_wrap"] = True
         if style.get("ha"):
             props["align"] = style["ha"]
+        if style.get("ind"):
+            props["indent"] = style["ind"]
         if style.get("va"):
             props["valign"] = {"top": "top", "middle": "vcenter", "bottom": "bottom"}[style["va"]]
         for key_, side in (("bt", "top"), ("br", "right"), ("bb", "bottom"), ("bl", "left")):
@@ -1779,29 +2063,30 @@ def naive(value):
 
 
 class OffsetSheet:
-    """A worksheet seen from a table placed `top` rows down and `left` columns across it: calls that
-    take a cell or a range are shifted, so the table can be written in its own coordinates."""
+    """A worksheet seen from a table placed on it (layout.Placed): calls that take a cell or a range
+    get the table's rows and columns moved to where the table put them, so the table can be written
+    in its own coordinates."""
 
     CELL_ARGS = {name: ((0,), (1,)) for name in (
         "write_blank", "write_string", "write_number", "write_boolean", "write_datetime", "write_formula",
         "write_url", "write_rich_string", "write_comment", "insert_checkbox")}
     CELL_ARGS.update({name: ((0, 2), (1, 3)) for name in ("merge_range", "data_validation")})
 
-    def __init__(self, ws, top, left=0):
-        self.ws, self.top, self.left = ws, top, left
+    def __init__(self, ws, placed):
+        self.ws, self.placed = ws, placed
 
     def __getattr__(self, name):
         method = getattr(self.ws, name)
         positions = self.CELL_ARGS.get(name)
-        if not positions or not (self.top or self.left):
+        if not positions:
             return method
 
         def shifted(*args, **kwargs):
             args = list(args)
-            for indexes, offset in zip(positions, (self.top, self.left)):
+            for indexes, place in zip(positions, (self.placed.sheet_row, self.placed.sheet_col)):
                 for p in indexes:
                     if p < len(args) and isinstance(args[p], int):
-                        args[p] += offset
+                        args[p] = place(args[p])
             return method(*args, **kwargs)
         return shifted
 
@@ -1812,14 +2097,15 @@ def title_height(title):
     return round(title["size"] * (2.5 if title["font"] == "Segoe UI" else 2.3) * 2) / 2
 
 
-def write_title(ws, row, col, title, table, formats, background):
-    """The table's name in a row above it, merged across the table, as Numbers shows it."""
+def write_title(ws, row, col, title, width, formats, background):
+    """The table's name in a row above it, merged across the table's `width` columns, as Numbers
+    shows it."""
     style = {"font": title["font"], "size": title["size"], "ha": "center", "va": "middle",
              "b": 1 if title["bold"] else 0, "i": 1 if title["italic"] else 0,
              "color": title["color"], "bg": background}
     fmt = formats.get({k: v for k, v in style.items() if v}, None)
-    if table.num_cols > 1:
-        ws.merge_range(row, col, row, col + table.num_cols - 1, title["text"], fmt)
+    if width > 1:
+        ws.merge_range(row, col, row, col + width - 1, title["text"], fmt)
     else:
         ws.write_string(row, col, title["text"], fmt)
 
@@ -1845,7 +2131,12 @@ def convert(path, out, password=None, layout_options=None, contents=False):
         for c, width in sorted(plan.cols.items()):
             sheet.set_column_pixels(c, c, max(8, round(width * 4 / 3)), None, {"hidden": c in plan.hidden_cols})
         for r, height in sorted(plan.rows.items()):
-            sheet.set_row(r, height, None, {"hidden": r in plan.hidden_rows})
+            options = {"hidden": r in plan.hidden_rows}
+            if r in plan.outline:
+                options["level"], options["collapsed"] = plan.outline[r]
+            sheet.set_row(r, height, None, options)
+        if plan.outline:  # a group's row is above its rows, so its button is there too
+            sheet.outline_settings(True, False, True, False)
         if plan.freeze:
             sheet.freeze_panes(*plan.freeze)
         if plan.autofilter:
@@ -1906,15 +2197,15 @@ def write_table(sheet, placed, layout, formats, lists, stats, sheet_refs):
     sheet_name = book.sheet_name_of[table._table_id]
     title = book.titles[table._table_id]
     if title:
-        write_title(sheet, placed.title_row, placed.col, title, table, formats,
+        write_title(sheet, placed.title_row, placed.col, title, placed.width, formats,
                     SHEET_BACKGROUNDS.get((id(table._model), table._table_id)))
-    ws = OffsetSheet(sheet, placed.row, placed.col)
-    top, left = placed.row, placed.col
+    ws = OffsetSheet(sheet, placed)
 
     merged_anchors = {}
     for rng in table.merge_ranges:
         r1, c1, r2, c2 = parse_range(rng)
-        merged_anchors[(r1, c1)] = (r2, c2)
+        if len(placed.runs(r1, r2)) == 1:  # in a grouped table, merged rows may no longer be neighbours
+            merged_anchors[(r1, c1)] = (r2, c2)
 
     computed = book.pivot_values.get(table._table_id, {})
     for r, row in enumerate(table_rows(table)):
@@ -1922,6 +2213,8 @@ def write_table(sheet, placed, layout, formats, lists, stats, sheet_refs):
             if isinstance(cell, MergedCell):
                 continue
             style = cell_style(cell)
+            if placed.view is not None:
+                style = grouped_style(placed, cell, style)
             if (r, c) in computed:  # recalculated pivot summary
                 value, source = computed[(r, c)]
                 fmt = formats.get(style, source and excel_number_format(source))
@@ -1936,11 +2229,27 @@ def write_table(sheet, placed, layout, formats, lists, stats, sheet_refs):
                 r2, c2 = merged_anchors[(r, c)]
                 ws.merge_range(r, c, r2, c2, None, fmt)
             if not write_special(ws, r, c, cell, style, fmt, formats,
-                                 lambda r=r, c=c: is_referenced(sheet_refs, r + top, c + left)):
+                                 lambda r=r, c=c: is_referenced(sheet_refs, *placed.cell(r, c))):
                 write_cell(ws, r, c, cell, fmt, layout, sheet_name, stats)
             add_cell_extras(ws, r, c, cell, lists)
+    if placed.view is not None:
+        write_grouped(sheet, placed, formats)
     rules, _ = table_highlights(layout, sheet_name, table)
     highlights.write(sheet, rules, formats.highlight)
+
+
+def write_grouped(sheet, placed, formats):
+    """A grouped table's category column, group rows and label rows (see grouped_cells)."""
+    for r, c, value, style, num_format, formula in grouped_cells(placed):
+        fmt = formats.get(style, num_format)
+        if formula:
+            sheet.write_formula(r, c, formula, fmt, value if value is not None else 0)
+        elif value is None:
+            sheet.write_blank(r, c, None, fmt)
+        elif isinstance(value, str):
+            sheet.write_string(r, c, value, fmt)
+        else:
+            sheet.write_number(r, c, value, fmt)
 
 
 def write_special(ws, r, c, cell, style, fmt, formats, referenced=lambda: False):

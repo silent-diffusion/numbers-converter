@@ -171,16 +171,19 @@ def predicate_text(model, table_id, row, col, nodes):
     return str(formula)
 
 
-def excel_rules(rules, translate, place):
+def excel_rules(rules, translate, place, split=None):
     """The Excel rules for a table's highlighting, [{"key", "areas" (on the worksheet), "options"
     (conditional_format's, but the format), "style"}] in the order they apply, and how many of
     Numbers' rules Excel can't express. translate(text, row, col) gives the Excel formula for
     Numbers formula text in the cell at (row, col) of the table, or None; place(row, col) a table
-    cell's (row, col) on its worksheet."""
+    cell's (row, col) on its worksheet; split(r1, c1, r2, c2) a block of table cells as blocks that
+    each stay in one piece on the worksheet (a grouped table's rows don't)."""
     model, table_id = rules.table._model, rules.table._table_id
     out, missed = [], rules.unreadable
     for key, rule_list in rules.sets.items():
         found = blocks(rules.cells[key])
+        if split is not None:
+            found = [piece for block in found for piece in split(*block)]
         stop = len(rule_list) > 1
         for rule in rule_list:
             formulas = []

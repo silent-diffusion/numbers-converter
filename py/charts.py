@@ -922,7 +922,7 @@ def write_charts(workbook, layout, worksheets, cell_info, unique_name):
     def place(cell):
         table_id, r, c = cell
         placed = layout.place[table_id]
-        return placed.sheet, r + placed.row, c + placed.col
+        return (placed.sheet, *placed.cell(r, c))
 
     written = 0
     for plan in layout.sheets:

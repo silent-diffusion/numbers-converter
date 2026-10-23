@@ -177,9 +177,13 @@ def compare_file(excel, numbers_path, apple_path, ours_path, max_rows, totals, e
             if a_ws is None or o_ws is None:
                 print(f"  {name}: no matching sheet for {candidates[0]!r}")
                 continue
-            rows = min(table.num_rows, max_rows)
-            cols = table.num_cols
-            expected = [[(nt.formatted(cell) or "").strip() for cell in row[:cols]] for row in nt.table_rows(table)[:min(rows, 6)]]
+            rows = min(placed.height, max_rows)
+            cols = placed.width
+            if placed.view is None:
+                expected = [[(nt.formatted(cell) or "").strip() for cell in row[:cols]] for row in nt.table_rows(table)[:min(rows, 6)]]
+            else:  # grouped into categories: its rows as both exports lay them out, with group and label rows
+                expected = [[str(o_ws.Cells(1 + placed.row + r, 1 + placed.col + c).Text).strip() for c in range(cols)]
+                            for r in range(min(rows, 6))]
             a_off = locate(a_ws, expected)
             if a_off is None:
                 a_off = (1, 0)  # empty table: Apple puts the title in row 1

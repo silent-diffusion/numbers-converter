@@ -60,8 +60,9 @@ Each Numbers table becomes an Excel sheet (with the table's name in a title row 
 - **Text boxes and shapes** — titles, notes and drawings keep their text (paragraphs, fonts, bold/italic/coloured words, alignment, spacing, bullets and numbering, padding), fill, border and line, and their outline: rectangles, rounded rectangles, ovals, lines, arrows, stars, polygons, speech bubbles and freehand shapes, turned and flipped as in Numbers, including inside groups. They keep their place as charts do; a title or note above a table gets room made above it, as in Apple's own export.
 - **Images** — pictures keep their place, size, crop (including rounded or oval masks), border, transparency, description and link. For a picture Excel can't show (HEIC, TIFF or PDF), the app uses the preview Numbers keeps of it where there is one. A video shows its poster frame.
 - **Conditional highlighting** — each rule becomes an Excel conditional formatting rule on the same cells, with the same text colour, fill, bold, italic, underline or strikethrough: comparisons with a value as "Cell Value" rules, anything else Excel can calculate as formula rules. As in Numbers, the first rule a cell matches is the one that applies.
+- **Categories** — a table grouped into categories comes out grouped, as Numbers shows it and as Apple's own export writes it: a category column with each group's name, and each group's row above its rows (with groups inside it indented under it), showing its summaries (sum, average, minimum, maximum, count) as formulas that keep calculating, under a label row that names them. Each group is also an Excel outline group, so it collapses with the buttons beside the rows as it does in Numbers (not on **One sheet**, where tables beside it share its rows). Formulas that read the table follow its rows to where they went.
 
-Not carried over yet: the grouped view of tables with categories (their rows come out in their original order), bubble charts, pictures Excel can't show that have no preview, and the occasional highlighting rule Excel can't calculate. When a file has any of these, **What changes in Excel** says so before you save.
+Not carried over yet: bubble charts, pictures Excel can't show that have no preview, and the occasional highlighting rule Excel can't calculate. When a file has any of these, **What changes in Excel** says so before you save.
 
 Password-protected files ask for the password and show its hint; the password is only kept in memory while the app is open.
 
@@ -91,8 +92,9 @@ The window is plain HTML, CSS and JavaScript in [`src/renderer`](src/renderer), 
 [`src/main.js`](src/main.js). The Numbers reader and Excel writer is a Python helper
 ([`py/numbers_tool.py`](py/numbers_tool.py), which also works out the "What changes in Excel" report, with pivot
 recalculation in [`py/pivots.py`](py/pivots.py), charts in [`py/charts.py`](py/charts.py), text boxes, shapes and
-images in [`py/drawings.py`](py/drawings.py), conditional highlighting in [`py/highlights.py`](py/highlights.py) and
-sheet layout in [`py/layout.py`](py/layout.py), built on
+images in [`py/drawings.py`](py/drawings.py), conditional highlighting in [`py/highlights.py`](py/highlights.py),
+tables grouped into categories in [`py/categories.py`](py/categories.py) and sheet layout in
+[`py/layout.py`](py/layout.py), built on
 [numbers-parser](https://github.com/masaccio/numbers-parser) and [XlsxWriter](https://xlsxwriter.readthedocs.io/)).
 The installer ships it as a standalone PyInstaller build, so users don't need Python.
 

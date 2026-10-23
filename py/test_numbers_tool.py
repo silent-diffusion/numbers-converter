@@ -17,6 +17,7 @@ from numbers_parser.generated import TSDArchives_pb2 as TSD
 from openpyxl import load_workbook
 
 sys.path.insert(0, os.path.dirname(__file__))
+import categories  # noqa: E402
 import charts  # noqa: E402
 import drawings  # noqa: E402
 import highlights  # noqa: E402
@@ -775,6 +776,101 @@ def test_highlighting_converts():
     assert highlights.matches("<", None, "0") is False and highlights.matches("<=", None, "0")  # a blank cell is 0
     assert highlights.matches("==", "done", '"Done"') and highlights.matches(">", "text", "100")
     assert highlights.blocks([(8, 4)] + [(r, c) for r in range(9, 15) for c in range(1, 5)]) == [(8, 4, 8, 4), (9, 1, 14, 4)]
+
+
+def test_categories_convert():
+    # Tables grouped into categories come out as Numbers shows them: a category column, a row with
+    # each group's name, its rows under it in Numbers' order, groups inside groups, and each group
+    # an Excel outline group that collapses (its button on the group's row, above its rows).
+    result, wb = convert("test-categories")
+    ws = wb["Categories - Categories"]
+    assert [ws.cell(r, 1).value for r in (3, 14, 25)] == ["Transport", "Fruit", "Animal"]
+    assert [ws.cell(2, c).value for c in range(1, 5)] == [None, "Description", "Category", "Count"]
+    # Transport's rows are the table's rows 1, 5, 6...: each still reads its own row of the table
+    # it copies from (whose title row puts row 1 on row 3).
+    assert ws["B4"].value == "='Categories - Uncategorized'!A3" and ws["B5"].value == "='Categories - Uncategorized'!A7"
+    assert ws.row_dimensions[3].outlineLevel == 0 and ws.row_dimensions[4].outlineLevel == 1
+    assert ws.sheet_properties.outlinePr.summaryBelow is False
+    assert result["formulasAsValues"] == 0
+
+    nested = wb["Categories - Nested Categories"]
+    assert [nested.cell(r, 1).value for r in (3, 4)] == ["Not “Edible”", "Transport"]  # a checkbox's groups
+    assert nested["A4"].alignment.indent == 1 and nested.row_dimensions[5].outlineLevel == 2
+    assert wb["Categories - Date Year-Month"]["A3"].value == "February 2010"  # by a part of a date
+    assert wb["Categories - Date Year-Quarter"]["A3"].value == "2010-Q1"
+    assert wb["Categories - Date Weekday"]["A3"].value == "Sunday"
+
+    # On one sheet the tables sit side by side, so their rows can't collapse; they're still grouped.
+    _, wb = convert("test-categories", {"default": "sheet"})
+    p = placed("test-categories", "Categories", {"default": "sheet"}, table="Categories")
+    ws = wb["Categories"]
+    assert ws.cell(p.row + 2, p.col + 1).value == "Transport"
+    assert not any(ws.row_dimensions[r].outlineLevel for r in range(1, 40))
+
+    preview = nt.preview(fixture("test-categories"))
+    sheet = next(s for s in preview["sheets"] if s["name"] == "Categories - Categories")
+    assert sheet["rows"][2][0][0] == "Transport" and sheet["rows"][3][1][0] == "Airplane"
+    assert "10 tables grouped into categories, with each group’s row and summaries" in preview["report"]["kept"]
+    assert not [c for c in preview["report"]["changes"] if c["kind"].startswith("categor")]
+
+
+def test_category_summaries():
+    # The sample's groups have no summaries, so give the Categories table's groups a sum of Count
+    # (Numbers' code for Sum): Excel gets a label row, then each group's sum as a live formula
+    # over its rows.
+    path = fixture("test-categories")
+    doc = Document(path)
+    table = next(t for s in doc.sheets for t in s.tables if t.name == "Categories")
+    model = doc._model
+    tm = model.objects[table._table_id]
+    archive = model.objects[model.objects[tm.category_owner.identifier].group_by[0].identifier]
+    uids = model.objects[tm.base_column_row_uids.identifier]
+    summary = archive.column_agg_type.add()
+    summary.column_uid.CopyFrom(uids.sorted_column_uids[uids.column_uid_for_index[2]])
+    summary.level, summary.agg_type = 1, 2
+    nt._cache[(path, os.path.getmtime(path), None)] = nt.Book(doc)
+    try:
+        _, wb = convert("test-categories")
+        ws = wb["Categories - Categories"]
+        assert (ws["A3"].value, ws["D3"].value) == ("Category:", "Sum:")
+        assert [(ws.cell(r, 1).value, ws.cell(r, 4).value) for r in (4, 15, 26)] == [
+            ("Transport", "=SUM(D5:D14)"), ("Fruit", "=SUM(D16:D25)"), ("Animal", "=SUM(D27:D36)")]
+        assert ws["A4"].font.b and ws["D4"].font.b
+    finally:
+        nt._cache.clear()
+
+    # A summary whose code isn't known is recognised from the results Numbers saved, and kept as
+    # they are when they don't tell one function from another, or disagree with the known code.
+    groups = [SimpleNamespace(uid="a", rows=[0, 1]), SimpleNamespace(uid="b", rows=[2])]
+    data = [[2.0], [4.0], [9.0]]
+    tools = SimpleNamespace(number=lambda value: value, filled=lambda value: value is not None)
+    saved = {("a", 0): (3.0, None), ("b", 0): (9.0, None)}
+    assert categories.settle(categories.UNKNOWN, groups, 0, saved, data, tools) == "average"
+    assert categories.settle("sum", groups, 0, saved, data, tools) is None
+    assert categories.settle(categories.UNKNOWN, groups[1:], 0, saved, data, tools) is None
+    counts = {("a", 0): (2.0, None), ("b", 0): (1.0, None)}
+    assert categories.settle(categories.UNKNOWN, groups, 0, counts, data, tools) == "count"
+    assert categories.settle("sum", groups, 0, {}, data, tools) == "sum"  # nothing saved to check against
+
+
+def test_references_into_grouped_tables():
+    # Formulas reading a grouped table follow its rows to where they went: a range whose rows come
+    # apart becomes a union of the pieces in functions that read one, and keeps its value elsewhere.
+    book = nt.load(fixture("test-categories"))
+    layout_ = book.layout()
+    table = next(t for _, t in book.tables if t.name == "Categories")
+    tid, p = table._table_id, layout_.place[table._table_id]
+    other = f"'{p.sheet}'!"
+    r, c = p.cell(5, 2)
+    assert nt.translate_formula(f"⟦{tid}|5|5|2|2|0⟧+1", layout_, "Categories") == f"={other}{nt.column_letters(c)}{r + 1}+1"
+    assert nt.translate_formula(f"SUM(⟦{tid}|5|7|2|2|0⟧)", layout_, "Categories") == f"=SUM({other}D5:D7)"
+    assert nt.translate_formula(f"SUM(⟦{tid}|||2|2|0⟧)", layout_, "Categories") == (
+        f"=SUM(({other}D4:D13,{other}D15:D24,{other}D26:D35))")
+    why = []
+    assert nt.translate_formula(f"VLOOKUP(1, ⟦{tid}|1|30|1|2|0⟧, 2, 0)", layout_, "Categories", why=why) is None
+    assert why == ["category"]
+    why = []
+    assert nt.translate_formula(f"ROW(⟦{tid}|5|5|2|2|0⟧)", layout_, "Categories", why=why) is None and why == ["category"]
 
 
 if __name__ == "__main__":

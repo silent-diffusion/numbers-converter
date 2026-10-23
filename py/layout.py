@@ -28,10 +28,59 @@ PT_TO_PX = 4 / 3
 
 class Placed:
     """A table on a worksheet: the worksheet's name, the table's first row and column there
-    (0-based), and the row holding its title when Numbers shows its name."""
+    (0-based), and the row holding its title when Numbers shows its name. A table grouped into
+    categories (`view`, a categories.Grouping) starts with its category column and has its rows in
+    display order, with group and label rows among them, so cell() says where a table cell went;
+    `height` and `width` count its rows and columns on the worksheet."""
 
-    def __init__(self, table, sheet, row, col, title_row):
+    def __init__(self, table, sheet, row, col, title_row, view=None):
         self.table, self.sheet, self.row, self.col, self.title_row = table, sheet, row, col, title_row
+        self.view = view
+        self._runs = {}  # (r1, r2) -> runs(r1, r2): formulas often read the same whole column
+
+    @property
+    def height(self):
+        return len(self.view.rows) if self.view else self.table.num_rows
+
+    @property
+    def width(self):
+        return self.table.num_cols + (1 if self.view else 0)
+
+    def sheet_row(self, r):
+        return self.row + (self.view.at[r] if self.view else r)
+
+    def sheet_col(self, c):
+        return self.col + c + (1 if self.view else 0)
+
+    def cell(self, r, c):
+        """Where the table's cell at row r, column c is on the worksheet."""
+        return self.sheet_row(r), self.sheet_col(c)
+
+    def runs(self, r1, r2):
+        """Table rows r1..r2 as runs whose rows follow one another on the worksheet, in order:
+        [(first, last)] in table rows. Always one run, unless the table is grouped."""
+        if self.view is None:
+            return [(r1, r2)]
+        if (r1, r2) not in self._runs:
+            out = []
+            for r in range(r1, r2 + 1):
+                if out and self.sheet_row(r) == self.sheet_row(out[-1][1]) + 1:
+                    out[-1][1] = r
+                else:
+                    out.append([r, r])
+            self._runs[(r1, r2)] = [tuple(run) for run in out]
+        return self._runs[(r1, r2)]
+
+    def pieces(self, r1, r2):
+        """The worksheet rows that table rows r1..r2 went to, top to bottom: [(first, last)]."""
+        key = ("pieces", r1, r2)
+        if key not in self._runs:
+            self._runs[key] = spans(self.sheet_row(r) for r in range(r1, r2 + 1))
+        return self._runs[key]
+
+    def blocks(self, r1, c1, r2, c2):
+        """A block of table cells as blocks that each sit in one piece on the worksheet."""
+        return [(a, c1, b, c2) for a, b in self.runs(r1, r2)]
 
 
 class Worksheet:
@@ -48,6 +97,7 @@ class Worksheet:
         self.drawings = []                  # [(text box, shape or picture, (x, y) in pixels)], in stacking order
         self.freeze = None                  # (rows, columns) kept in view, counted from the top-left
         self.autofilter = None              # (first row, first column, last row, last column)
+        self.outline = {}                   # {row: (outline level, collapsed)} of tables grouped into categories
 
     def size(self):
         return max(self.rows, default=-1) + 1, max(self.cols, default=-1) + 1
@@ -60,16 +110,18 @@ class Worksheet:
     def rect(self, placed):
         """(x, y, width, height) in points of a table on this sheet, title row included."""
         x, y = self.offset(True, placed.col), self.offset(False, placed.row if placed.title_row is None else placed.title_row)
-        return (x, y, self.offset(True, placed.col + placed.table.num_cols) - x,
-                self.offset(False, placed.row + placed.table.num_rows) - y)
+        return (x, y, self.offset(True, placed.col + placed.width) - x,
+                self.offset(False, placed.row + placed.height) - y)
 
 
 class Footprint:
     """A table on its Numbers sheet: its position there, and its rows (title row first, if shown)
-    and columns as they're written out: [(size in points, hidden)]."""
+    and columns as they're written out: [(size in points, hidden)]. `view` is the grouped view of a
+    table with categories (see Placed)."""
 
-    def __init__(self, table, position, rows, cols, title):
+    def __init__(self, table, position, rows, cols, title, view=None):
         self.table, self.position, self.rows, self.cols, self.title = table, position, rows, cols, title
+        self.view = view
 
     def spans(self, columns):
         """Sizes along one axis as the table takes up space on the Numbers sheet (hidden: none)."""
@@ -140,6 +192,7 @@ class Layout:
             # Header rows stay frozen under a little room made for a title or note (frozen with them).
             for_drawings = not arrange([(y, f.spans(False))], corner([f], charts)[1], EXCEL_MAX_ROW_HEIGHT)[1]
             freeze(ws, {} if for_drawings and sum(gaps.values()) <= FROZEN_ROOM else gaps)
+            self.outline(ws)
             self.position_charts(ws, charts, origin)
             self.position_drawings(ws, drawn[id(f)], origin)
             self.sheets.append(ws)
@@ -162,6 +215,7 @@ class Layout:
         fill(ws, row_gaps, col_gaps)
         if len(footprints) == 1 and not col_gaps:  # a lone table in column A freezes as on a sheet of its own
             freeze(ws, row_gaps)
+        self.outline(ws)
         self.position_charts(ws, sheet_charts, origin, footprints)
         self.position_drawings(ws, sheet_drawings, origin, footprints)
         self.sheets.append(ws)
@@ -181,7 +235,7 @@ class Layout:
         and columns. A row (column) shared with another table is as large as the larger of them
         needs, and hidden only if both hide it."""
         title = 1 if f.title else 0
-        placed = Placed(f.table, ws.name, start_row + title, start_col, start_row if title else None)
+        placed = Placed(f.table, ws.name, start_row + title, start_col, start_row if title else None, f.view)
         ws.tables.append(placed)
         self.place[f.table._table_id] = placed
         for sizes, hidden, used, items, start in ((ws.rows, ws.hidden_rows, ws.used_rows, f.rows, start_row),
@@ -200,8 +254,21 @@ class Layout:
         table = f.table
         if ws.autofilter is None and extras.filter_enabled(table) and table.num_rows > 1:
             header = max(table.num_header_rows - 1, 0)  # Excel puts the filter buttons on the last header row
-            ws.autofilter = (placed.row + header, placed.col, placed.row + table.num_rows - 1,
-                             placed.col + table.num_cols - 1)
+            ws.autofilter = (placed.row + header, placed.col, placed.row + placed.height - 1,
+                             placed.col + placed.width - 1)
+
+    def outline(self, ws):
+        """Makes each group of a grouped table an outline group, so Excel can collapse it as Numbers
+        does: unless another table shares its rows, which collapsing would hide too."""
+        for placed in ws.tables:
+            if placed.view is None:
+                continue
+            first, last = placed.title_row if placed.title_row is not None else placed.row, placed.row + placed.height
+            if any(other is not placed and (other.title_row if other.title_row is not None else other.row) < last
+                   and first < other.row + other.height for other in ws.tables):
+                continue
+            for k, ((kind, item), depth) in enumerate(zip(placed.view.rows, placed.view.depth)):
+                ws.outline[placed.row + k] = (depth, kind == "group" and item.collapsed)
 
     def position_charts(self, ws, sheet_charts, origin, footprints=None):
         """Charts keep their place on the Numbers sheet, measured from the sheet's top-left corner
@@ -215,6 +282,17 @@ class Layout:
         """Text boxes, shapes and pictures keep their place the same way."""
         for d in sheet_drawings:
             ws.drawings.append((d, spot(ws, d.frame, origin, footprints)))
+
+
+def spans(rows):
+    """Row (or column) numbers as runs of consecutive ones, smallest first: [(first, last)]."""
+    out = []
+    for r in sorted(rows):
+        if out and r <= out[-1][1] + 1:
+            out[-1][1] = max(out[-1][1], r)
+        else:
+            out.append([r, r])
+    return [tuple(run) for run in out]
 
 
 def spot(ws, frame, origin, footprints):
@@ -312,11 +390,14 @@ def arrange(blocks, origin, limit, share=None):
 
 def freeze(ws, row_gaps):
     """Keeps a worksheet's only table's header rows and columns in view where Numbers freezes them;
-    not its rows when rows above it make room for charts, which would be frozen too."""
+    not its rows when rows above it make room for charts, which would be frozen too. A grouped
+    table's category column stays in view with its header columns."""
     table = ws.tables[0].table
     tm = table._model.objects[table._table_id]
     rows = table.num_header_rows if tm.header_rows_frozen else 0
     cols = table.num_header_cols if tm.header_columns_frozen else 0
+    if cols and ws.tables[0].view is not None:
+        cols += 1
     if rows and not row_gaps:
         ws.freeze = (ws.tables[0].row + rows, cols)
     elif cols:
