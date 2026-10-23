@@ -8,7 +8,8 @@ Numbers' other export options), the file is converted with py/numbers_tool.py, l
 export was (an Excel sheet per table, or one per Numbers sheet), and both workbooks are opened in
 Excel (so values, text, fonts, fills, borders, alignment and number formats are read exactly as Excel
 shows them). Each Numbers table is located in both workbooks and compared cell by cell, and so is
-each chart. Prints a score per attribute, per file, and example differences. Needs Windows with
+each chart; each PivotTable is refreshed by Excel in both and compared by its fields, totals, labels
+and values. Prints a score per attribute, per file, and example differences. Needs Windows with
 Excel installed (pywin32).
 """
 
@@ -170,7 +171,7 @@ def compare_file(excel, numbers_path, apple_path, ours_path, max_rows, totals, e
     try:
         for sheet_name, table in book.tables:
             if table._model.objects[table._table_id].HasField("pivot_owner"):
-                continue  # Apple writes a real Excel pivot table, laid out Excel's way; ours mirrors Numbers
+                continue  # compared as PivotTables, below
             placed = layout.place[table._table_id]
             candidates = [f"{sheet_name} - {table.name}", sheet_name, placed.sheet]
             a_ws, o_ws = find_sheet(apple, candidates), find_sheet(ours, [placed.sheet])
@@ -253,6 +254,24 @@ def compare_file(excel, numbers_path, apple_path, ours_path, max_rows, totals, e
         others = lambda shapes: sorted(s["kind"] for s in shapes if not s["text"])  # noqa: E731
         record(totals, file_scores, file_totals, examples, "shapes", others(shape_list(apple)) == others(shape_list(ours)),
                f"{name}: apple {others(shape_list(apple))} ours {others(shape_list(ours))}")
+        # PivotTables: matched by name and refreshed by Excel in both workbooks, comparing their
+        # fields and summaries, grand totals, labels and values; and ours must show, before the
+        # refresh, exactly what Excel works out.
+        mine = pivot_list(ours)
+        for a in pivot_list(apple):
+            o = next((p for p in mine if p["name"] == a["name"]), None)
+            label = f"{name} pivot {a['name']!r}"
+            record(totals, file_scores, file_totals, examples, "pivot", o is not None, f"{label}: not a PivotTable in ours")
+            if o is None:
+                continue
+            mine.remove(o)
+            for key in ("fields", "totals", "values"):
+                record(totals, file_scores, file_totals, examples, f"pivot {key}", a[key] == o[key],
+                       f"{label}: apple {a[key]} ours {o[key]}")
+            record(totals, file_scores, file_totals, examples, "pivot labels", same_labels(a["labels"], o["labels"]),
+                   f"{label}: apple {a['labels']} ours {o['labels']}")
+            record(totals, file_scores, file_totals, examples, "pivot refresh", o["before"] == o["after"],
+                   f"{label}: ours shows {o['before']} until Excel refreshes it to {o['after']}")
     finally:
         apple.Close(False)
         ours.Close(False)
@@ -294,6 +313,48 @@ def shape_list(wb):
                           "size": round(first.Size, 1) if first else None, "bold": bool(first.Bold) if first else None,
                           "kind": "picture" if shape.Type == 13 else "line" if shape.Height < 1 or shape.Width < 1 else "shape"})
     return found
+
+
+def pivot_list(wb):
+    """Every PivotTable in a workbook: its name and cells as the file shows them, then, once Excel
+    has refreshed it from its source: its cells again, how many row and column fields it has and
+    how it summarises each value, which grand totals it shows, its row and column labels, and the
+    values it works out."""
+    def texts(rng):
+        return [[str(rng.Cells(r, c).Text).strip() for c in range(1, rng.Columns.Count + 1)]
+                for r in range(1, rng.Rows.Count + 1)] if rng is not None else []
+
+    def part(get):
+        try:
+            return get()
+        except Exception:  # a PivotTable without row (or column) fields has no such range
+            return None
+
+    found = []
+    for ws in wb.Worksheets:
+        for i in range(1, ws.PivotTables().Count + 1):
+            pt = ws.PivotTables(i)
+            before = texts(pt.TableRange1)
+            pt.PivotCache().Refresh()
+            data = [pt.DataFields.Item(j) for j in range(1, pt.DataFields.Count + 1)]
+            body = part(lambda: pt.DataBodyRange)
+            values = [[round(v, 6) if isinstance(v, float) else v for v in row]
+                      for row in (body.Value if body is not None and body.Count > 1 else ((body.Value,),) if body else ())]
+            found.append({"name": pt.Name, "before": before, "after": texts(pt.TableRange1),
+                          "fields": (pt.RowFields.Count, pt.ColumnFields.Count, [d.Function for d in data]),
+                          "totals": (bool(pt.RowGrand), bool(pt.ColumnGrand)),
+                          "labels": [cell for rng in (part(lambda: pt.RowRange), part(lambda: pt.ColumnRange))
+                                     for row in texts(rng) for cell in row if cell],
+                          "values": values})
+    return found
+
+
+def same_labels(apple, ours):
+    """Whether two PivotTables' labels match, allowing for Apple leaving Excel's own names on date
+    groups ("Jan" where Numbers shows "January") and its fields ("Date" for "Date (Month)")."""
+    if len(apple) != len(ours):
+        return False
+    return all(a.casefold() == o.casefold() or o.casefold().startswith(a.casefold()) for a, o in zip(apple, ours))
 
 
 def record(totals, file_scores, file_totals, examples, key, ok, example):

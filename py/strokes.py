@@ -74,6 +74,14 @@ def compute(model, table_id):
     tm = model.objects[table_id]
     rows, cols = tm.number_of_rows, tm.number_of_columns
     hr, hc, fr = tm.number_of_header_rows, tm.number_of_header_columns, tm.number_of_footer_rows
+    horizontal, vertical = style_lines(model, tm, rows, cols, hr, hc, fr)
+    apply_sidecar(model, tm, horizontal, vertical, rows, cols)
+    return horizontal, vertical
+
+
+def style_lines(model, tm, rows, cols, hr, hc, fr):
+    """The lines the table's style draws on a table of this size (no lines set on single cells):
+    also used for a pivot table as Excel lays it out, which has more rows and columns."""
     style = model.objects[tm.table_style.identifier] if tm.HasField("table_style") else None
 
     def line(name):
@@ -152,8 +160,6 @@ def compute(model, table_id):
                 vertical[r][x] = s["header_column_vertical_stroke"]
             else:
                 vertical[r][x] = s["table_body_vertical_stroke"]
-
-    apply_sidecar(model, tm, horizontal, vertical, rows, cols)
     return horizontal, vertical
 
 

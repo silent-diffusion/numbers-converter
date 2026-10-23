@@ -54,7 +54,7 @@ Each Numbers table becomes an Excel sheet (with the table's name in a title row 
 - **Cell extras** — comments (as Excel notes), links, bold/italic/coloured words within a cell, bullet and numbered lists, hidden rows and columns, filters (as Excel AutoFilter)
 - **Form controls** — checkboxes (Excel checkboxes), pop-up menus (dropdown lists), sliders, steppers and star ratings (as number-range rules)
 - **Formulas** — rewritten as Excel formulas so they keep calculating, including references to other tables and to columns by their header name (`SUM(Amount)`). Formulas that use Apple-only functions, functions that behave differently in Excel, or approximate lookups on unsorted data (where Excel's answer can differ) keep their last value instead, and the app tells you how many.
-- **Pivot tables** — newer versions of Numbers don't save pivot totals in the file, so the app recalculates them from the pivot's rules and its source data (grouping by value, date part, etc.; sum, average, count, minimum, maximum). Pivot results are saved as values, not as an Excel pivot table. Any pivot it can't reproduce exactly (e.g. "show as percentage" or running totals) is reported and its totals are left blank rather than guessed.
+- **Pivot tables** — become real Excel PivotTables that read the converted source table, placed where Numbers places them, with the same row, column and value fields, summaries (sum, average, count, minimum, maximum), grouping (by value, or by a date part Excel can group by itself, such as year, quarter or month; any other grouping keeps Numbers' groups, made of the same values), sort order (A to Z, Z to A, by a value's totals, or as Numbers lists them), subtotals and grand totals, and Numbers' labels, number formats and colours (as a PivotTable style, so they stay when Excel refreshes the table). Newer versions of Numbers don't save pivot totals in the file, so the app works them out from the pivot's rules and its source data: the PivotTable opens showing exactly the totals Excel gets when it refreshes it, with no repair prompt. A pivot Excel can't show the same way is reported and its totals are left blank rather than guessed (e.g. "show as percentage" or running totals), or saved as values (a pivot of a table grouped into categories).
 
 - **Charts** — column, bar, stacked, line, area, pie, donut, scatter, radar, 2-axis and mixed charts become real Excel charts that read the converted cells, so they update when the data changes. Each keeps its place beside, above or below its table (rows are added above a table to make room for charts over it, as Apple's own export does), its colours, title, legend, gaps, value labels, axis titles and gridlines. The preview shows them where they'll be. 3D charts come out flat, and interactive charts show all their data sets at once. Bubble charts aren't converted yet; the app tells you when a file has one.
 - **Text boxes and shapes** — titles, notes and drawings keep their text (paragraphs, fonts, bold/italic/coloured words, alignment, spacing, bullets and numbering, padding), fill, border and line, and their outline: rectangles, rounded rectangles, ovals, lines, arrows, stars, polygons, speech bubbles and freehand shapes, turned and flipped as in Numbers, including inside groups. They keep their place as charts do; a title or note above a table gets room made above it, as in Apple's own export.
@@ -91,10 +91,10 @@ Numbers Converter does all of its work on your PC.
 The window is plain HTML, CSS and JavaScript in [`src/renderer`](src/renderer), and the Electron main process is
 [`src/main.js`](src/main.js). The Numbers reader and Excel writer is a Python helper
 ([`py/numbers_tool.py`](py/numbers_tool.py), which also works out the "What changes in Excel" report, with pivot
-recalculation in [`py/pivots.py`](py/pivots.py), charts in [`py/charts.py`](py/charts.py), text boxes, shapes and
-images in [`py/drawings.py`](py/drawings.py), conditional highlighting in [`py/highlights.py`](py/highlights.py),
-tables grouped into categories in [`py/categories.py`](py/categories.py) and sheet layout in
-[`py/layout.py`](py/layout.py), built on
+recalculation in [`py/pivots.py`](py/pivots.py) and Excel PivotTables in [`py/pivot_tables.py`](py/pivot_tables.py),
+charts in [`py/charts.py`](py/charts.py), text boxes, shapes and images in [`py/drawings.py`](py/drawings.py),
+conditional highlighting in [`py/highlights.py`](py/highlights.py), tables grouped into categories in
+[`py/categories.py`](py/categories.py) and sheet layout in [`py/layout.py`](py/layout.py), built on
 [numbers-parser](https://github.com/masaccio/numbers-parser) and [XlsxWriter](https://xlsxwriter.readthedocs.io/)).
 The installer ships it as a standalone PyInstaller build, so users don't need Python.
 
@@ -115,8 +115,8 @@ Apple's `X.xlsx` export (File → Export To → Excel in Numbers; name exports w
 Excel, and scores how closely each cell matches: text, formulas, fonts, fills, borders, alignment, number formats,
 row heights and column widths; each chart: its type, and the values and labels Excel reads for each series; and
 each text box: its text, font and (where both lay a Numbers sheet out on one worksheet) its place, plus lines and
-other shapes. Needs Windows with Excel. Pivot tables are skipped (Apple writes Excel pivot tables, laid out Excel's
-way).
+other shapes; and each PivotTable, once Excel has refreshed both: its fields and summaries, grand totals, labels and
+values, and whether ours showed those same cells before the refresh. Needs Windows with Excel.
 
 ```bash
 .venv\Scripts\python tools/compare_with_apple.py path\to\folder

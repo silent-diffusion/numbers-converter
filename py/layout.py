@@ -36,14 +36,19 @@ class Placed:
     def __init__(self, table, sheet, row, col, title_row, view=None):
         self.table, self.sheet, self.row, self.col, self.title_row = table, sheet, row, col, title_row
         self.view = view
+        self.size = None  # (rows, columns) written, when a pivot table takes more than its own (see put)
         self._runs = {}  # (r1, r2) -> runs(r1, r2): formulas often read the same whole column
 
     @property
     def height(self):
+        if self.size:
+            return self.size[0]
         return len(self.view.rows) if self.view else self.table.num_rows
 
     @property
     def width(self):
+        if self.size:
+            return self.size[1]
         return self.table.num_cols + (1 if self.view else 0)
 
     def sheet_row(self, r):
@@ -236,6 +241,8 @@ class Layout:
         needs, and hidden only if both hide it."""
         title = 1 if f.title else 0
         placed = Placed(f.table, ws.name, start_row + title, start_col, start_row if title else None, f.view)
+        if (len(f.rows) - title, len(f.cols)) != (placed.height, placed.width):  # a pivot table laid out as Excel does
+            placed.size = (len(f.rows) - title, len(f.cols))
         ws.tables.append(placed)
         self.place[f.table._table_id] = placed
         for sizes, hidden, used, items, start in ((ws.rows, ws.hidden_rows, ws.used_rows, f.rows, start_row),

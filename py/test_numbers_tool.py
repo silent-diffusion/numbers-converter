@@ -23,6 +23,7 @@ import drawings  # noqa: E402
 import highlights  # noqa: E402
 import layout  # noqa: E402
 import numbers_tool as nt  # noqa: E402
+import pivot_tables  # noqa: E402
 import pivots  # noqa: E402
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "..", "test", "fixtures")
@@ -228,12 +229,284 @@ def test_pivot_values_match_numbers():
     assert checked == 28
 
 
+def pivot_parts(path):
+    """{worksheet name: [(pivotTable xml, its pivotCacheDefinition xml, its pivotCacheRecords xml)]}."""
+    found = {}
+    with zipfile.ZipFile(path) as z:
+        read = lambda name: z.read(name).decode()  # noqa: E731
+        targets = dict(re.findall(r'Id="(rId\d+)"[^>]*Target="([^"]+)"', read("xl/_rels/workbook.xml.rels")))
+        for name, rid in re.findall(r'<sheet name="([^"]+)" sheetId="\d+" r:id="(rId\d+)"', read("xl/workbook.xml")):
+            rels = "xl/" + targets[rid].replace("worksheets/", "worksheets/_rels/") + ".rels"
+            if rels not in z.namelist():
+                continue
+            for table in re.findall(r'Target="\.\./pivotTables/([^"]+)"', read(rels)):
+                cache = re.search(r'Target="\.\./pivotCache/([^"]+)"', read(f"xl/pivotTables/_rels/{table}.rels")).group(1)
+                found.setdefault(html.unescape(name), []).append(
+                    (read(f"xl/pivotTables/{table}"), read(f"xl/pivotCache/{cache}"),
+                     read("xl/pivotCache/" + cache.replace("Definition", "Records"))))
+    return found
+
+
+def grid_values(ws, p, rows, cols):
+    """A placed table's cells on a converted worksheet, as a list of rows of values."""
+    return [[ws.cell(p.row + r + 1, p.col + c + 1).value for c in range(cols)] for r in range(rows)]
+
+
 def test_pivot_tables_convert():
+    # Numbers' pivot tables become Excel PivotTables reading the converted source table, laid out
+    # as Excel lays them out, with the totals Numbers shows (its own picture of this file shows
+    # APAC 84,800, EMEA 83,700, NA 95,400 and 263,900 in all) before anyone refreshes them.
     result, wb = convert("test-pivot")
-    assert result["unsupported"]["pivots"] == 0
+    assert result["unsupported"]["pivots"] == 0 and result["pivots"] == 2
+    ws = wb["Sales - Sales Pivot"]
+    p = placed("test-pivot", ws.title)
+    assert p.size == (6, 6)  # Excel's layout: two header rows, three regions and a grand total row
+    assert grid_values(ws, p, 6, 6) == [
+        ["Revenue (Sum)", "Quarter", None, None, None, None],
+        ["Region", "Q1", "Q2", "Q3", "Q4", "Grand Total"],
+        ["APAC", 17700, 20400, 28900, 17800, 84800],
+        ["EMEA", 18400, 22900, 23800, 18600, 83700],
+        ["NA", 12400, 27400, 28600, 27000, 95400],
+        ["Grand Total", 48500, 70700, 81300, 63400, 263900]]
+    assert ws.cell(p.row + 4, p.col + 2).number_format == "#,##0"  # as Numbers shows the pivot's values
     formulas = [c.value for ws in wb.worksheets for row in ws.iter_rows() for c in row if isinstance(c.value, str) and c.value.startswith("=")]
     assert "=" not in formulas  # undecodable pivot formulas must not become empty formulas
-    assert at("test-pivot", wb["Sales - Sales Pivot"], "B3").value == 18400
+
+    (table, cache, records), = pivot_parts(os.path.join(OUT, "test-pivot.xlsx"))["Sales - Sales Pivot"]
+    source = placed("test-pivot", "Sales - Sales")
+    ref = nt.shift_rows("A1:C13", source.row, source.col)  # the header row and the twelve rows, not the total
+    assert f'<worksheetSource ref="{ref}" sheet="Sales - Sales"/>' in cache and 'recordCount="12"' in cache
+    assert '<cacheField name="Region" numFmtId="0"><sharedItems count="3"><s v="EMEA"/><s v="APAC"/><s v="NA"/>' in cache
+    assert records.count("<r>") == 12 and '<r><x v="0"/><x v="0"/><n v="18400"/></r>' in records
+    assert f'<location ref="A{p.row + 1}:F{p.row + 6}" firstHeaderRow="1" firstDataRow="2" firstDataCol="1"/>' in table
+    assert '<pivotField axis="axisRow" compact="0" outline="0" showAll="0" sortType="ascending"><items count="4">' \
+           '<item x="1"/><item x="0"/><item x="2"/><item t="default"/></items></pivotField>' in table  # APAC, EMEA, NA
+    assert '<rowFields count="1"><field x="0"/></rowFields>' in table and '<colFields count="1"><field x="1"/></colFields>' in table
+    fmt = re.search(r'<dataField name="Revenue \(Sum\)" fld="2" baseField="0" baseItem="0" numFmtId="(\d+)"/>', table).group(1)
+    assert "rowGrandTotals" not in table and "colGrandTotals" not in table  # Numbers shows both
+    assert 'pivotTableStyleInfo name="Numbers Pivot 1"' in table
+    styles = zipfile.ZipFile(os.path.join(OUT, "test-pivot.xlsx")).read("xl/styles.xml").decode()
+    assert f'<numFmt numFmtId="{fmt}" formatCode="#,##0"/>' in styles  # the values' number format, kept on refresh
+    assert '<tableStyle name="Numbers Pivot 1" table="0"' in styles and 'pivotButton="1"' in styles
+    header = re.search(r'type="headerRow" dxfId="(\d+)"', styles).group(1)
+    assert 'rgb="FFBEC0BF"' in re.findall(r"<dxf>.*?</dxf>", styles)[int(header)]  # Numbers' header row colour
+    pivots_read = {ws.title: ws._pivots for ws in wb.worksheets if ws._pivots}  # openpyxl reads them back
+    assert [p.name for p in pivots_read["Sales - Sales Pivot"]] == ["Sales Pivot"]
+
+
+def test_pivot_tables_on_one_sheet():
+    # Laid out as in Numbers, the PivotTable shares a worksheet with its source table and takes the
+    # room its totals need, so the table below it moves down rather than being covered.
+    options = {"default": "sheet"}
+    result, wb = convert("test-pivot", options)
+    assert result["pivots"] == 2
+    ws = wb["Sales"]
+    pivot, source = placed("test-pivot", "Sales", options, "Sales Pivot"), placed("test-pivot", "Sales", options, "Sales")
+    metrics = placed("test-pivot", "Sales", options, "Metrics")
+    assert pivot.size == (6, 6) and metrics.row > pivot.row + 6 and metrics.col == pivot.col
+    assert grid_values(ws, pivot, 6, 6)[5] == ["Grand Total", 48500, 70700, 81300, 63400, 263900]
+    (table, cache, _), = pivot_parts(os.path.join(OUT, "test-pivot (sheet).xlsx"))["Sales"]
+    ref = nt.shift_rows("A1:C13", source.row, source.col)
+    assert f'<worksheetSource ref="{ref}" sheet="Sales"/>' in cache
+    assert f'<location ref="{nt.shift_rows("A1:F6", pivot.row, pivot.col)}"' in table
+
+
+def test_pivot_preview():
+    # The preview shows the PivotTable as Excel will, with drop-down arrows on its field buttons.
+    sheet = next(s for s in nt.preview(fixture("test-pivot"))["sheets"] if s["name"] == "Sales - Sales Pivot")
+    p = placed("test-pivot", sheet["name"])
+    cell = lambda r, c: grid_cell(sheet, p, r, c)  # noqa: E731
+    text = lambda r, c: cell(r, c) if isinstance(cell(r, c), str) else cell(r, c)[0]  # noqa: E731
+    assert [text(1, c) for c in range(6)] == ["Region", "Q1", "Q2", "Q3", "Q4", "Grand Total"]
+    assert [text(r, 5) for r in range(2, 6)] == ["84,800", "83,700", "95,400", "263,900"]
+    assert cell(1, 0)[2] == {"control": "popup"} and cell(0, 1)[2] == {"control": "popup"}  # Region and Quarter
+    assert sheet["styles"][cell(1, 1)[1]]["bg"] == "#BEC0BF" and sheet["styles"][cell(2, 0)[1]]["bg"] == "#DCDCDC"
+    assert sheet["styles"][cell(2, 5)[1]]["b"] == 1  # the grand total column, bold as in Numbers
+
+
+def view_rows(table, order):
+    """Makes Numbers show a pivot table's rows in another order: `order` lists the rows' indexes in
+    the table, "grand" for the grand total row (left out to hide it)."""
+    model = table._model
+    view = model.objects[pivots.find_table_info(model, table._table_id).view_column_row_uids.identifier]
+    base = model.objects[model.objects[table._table_id].base_column_row_uids.identifier]
+    uids = {base.row_index_for_uid[i]: (u.lower, u.upper) for i, u in enumerate(base.sorted_row_uids)}
+    uids["grand"] = pivot_tables.GRAND_UID
+    del view.sorted_row_uids[:], view.row_index_for_uid[:], view.row_uid_for_index[:]
+    for position, row in enumerate(order):
+        uid = view.sorted_row_uids.add()
+        uid.lower, uid.upper = uids[row]
+        view.row_index_for_uid.append(position)
+        view.row_uid_for_index.append(position)
+
+
+def test_pivot_order_and_totals_follow_numbers():
+    # The order Numbers shows a pivot's groups in, and whether it shows a grand total, come from
+    # what it last showed. (In this file the rows are EMEA, APAC, NA in the table and Numbers sorts
+    # them A to Z; here it's made to show them Z to A, then in no order, without a grand total.)
+    book = nt.load(fixture("test-pivot"))
+    _, table = book.tables[1]
+    try:
+        for order, sort, items in (([0, 1, 4, 2, 3], "descending", [2, 0, 1]), ([0, 1, 3, 4, 2], None, [1, 2, 0])):
+            view_rows(table, order)
+            nt.native_pivot(book, table, pivots.pivot_for(table))
+            book.layouts.clear()
+            out = os.path.join(OUT, "pivot-order.xlsx")
+            nt.convert(fixture("test-pivot"), out)
+            (xml, _, _), = pivot_parts(out)["Sales - Sales Pivot"]
+            field = re.search(r'<pivotField axis="axisRow"[^>]*>.*?</pivotField>', xml).group(0)
+            assert (f'sortType="{sort}"' in field) if sort else "sortType" not in field
+            assert re.findall(r'<item x="(\d)"/>', field) == [str(x) for x in items]
+            assert 'rowGrandTotals="0"' in xml and "colGrandTotals" not in xml
+            ws = load_workbook(out)["Sales - Sales Pivot"]
+            p = book.layout().place[table._table_id]
+            names = ["EMEA", "APAC", "NA"]
+            assert [ws.cell(p.row + 3 + i, p.col + 1).value for i in range(3)] == [names[x] for x in items]
+            assert ws.cell(p.row + 6, p.col + 1).value is None and p.size == (5, 6)  # no grand total row
+        # Groups sorted by their totals (NA 95,400, APAC 84,800, EMEA 83,700) use Excel's sort by
+        # value, which keeps them in that order when the data changes.
+        for order, sort, shown in (([0, 1, 4, 3, 2, "grand"], "descending", ["NA", "APAC", "EMEA"]),
+                                   ([0, 1, 2, 3, 4, "grand"], "ascending", ["EMEA", "APAC", "NA"])):
+            view_rows(table, order)
+            nt.native_pivot(book, table, pivots.pivot_for(table))
+            book.layouts.clear()
+            out = os.path.join(OUT, "pivot-by-value.xlsx")
+            nt.convert(fixture("test-pivot"), out)
+            (xml, _, _), = pivot_parts(out)["Sales - Sales Pivot"]
+            field = re.search(r'<pivotField axis="axisRow"[^>]*>.*?</pivotField>', xml).group(0)
+            assert f'sortType="{sort}"' in field and '<reference field="4294967294" count="1" selected="0"><x v="0"/>' in field
+            ws = load_workbook(out)["Sales - Sales Pivot"]
+            p = book.layout().place[table._table_id]
+            assert [ws.cell(p.row + 3 + i, p.col + 1).value for i in range(3)] == shown
+    finally:
+        nt._cache.clear()
+
+
+def test_pivot_summaries():
+    # How a value is summarised is read from its label ("Revenue (Average)"); Excel's PivotTable
+    # summarises it the same way.
+    book = nt.load(fixture("test-pivot"))
+    _, table = book.tables[1]
+    try:
+        owner = table._model.objects[table._model.objects[table._table_id].pivot_owner.identifier]
+        owner.aggregate_columns.aggregates[0].agg_type = 99  # a code that doesn't say
+        table.cell(1, 1)._value = "Revenue (Average)"
+        nt.native_pivot(book, table, pivots.pivot_for(table))
+        book.layouts.clear()
+        out = os.path.join(OUT, "pivot-average.xlsx")
+        nt.convert(fixture("test-pivot"), out)
+        (xml, _, _), = pivot_parts(out)["Sales - Sales Pivot"]
+        assert '<dataField name="Revenue (Average)" fld="2" subtotal="average"' in xml
+        ws = load_workbook(out)["Sales - Sales Pivot"]
+        p = book.layout().place[table._table_id]
+        assert ws.cell(p.row + 3, p.col + 6).value == 84800 / 4 and abs(ws.cell(p.row + 6, p.col + 6).value - 263900 / 12) < 1e-9
+        assert ws.cell(p.row + 3, p.col + 6).number_format == "#,##0.00"  # two decimal places for averages of whole numbers
+        table.cell(1, 1)._value = "Revenue (Running Total)"  # a summary Excel can't match: values, as before
+        nt.native_pivot(book, table, pivots.pivot_for(table))
+        assert table._table_id not in book.native_pivots
+    finally:
+        nt._cache.clear()
+
+
+def test_pivot_date_groupings():
+    # A Numbers grouping that splits dates exactly as one of Excel's does becomes that grouping
+    # (Excel then groups new dates itself); any other is listed group by group, named as in Numbers.
+    month = SimpleNamespace(grouping_functor=SimpleNamespace(formula=SimpleNamespace(AST_node_array=SimpleNamespace(
+        AST_node=rpn("x", "SUM/1", "x", "=", "x", "ISBLANK/1", "NOT/1", "AND/2",
+                     "{", 2020, "x", "MONTH/1", 1, "DATE/3", "}", "{", 1, 0, "/", "}", "IF/3")))))
+    dates = [dt.datetime(2021, 1, 5), dt.datetime(2021, 3, 1), None, dt.datetime(2022, 1, 9)]
+    keys = {0: pivots.norm(dt.datetime(2020, 1, 1)), 1: pivots.norm(dt.datetime(2020, 3, 1)), 2: pivot_tables.Excluded, 3: None}
+    keys[3] = keys[0]
+    group = pivot_tables.native_group(month, dates, keys)
+    assert group.by == "months" and group.items[1:13] == pivot_tables.MONTHS and group.items[0] == "<1/5/2021"
+    assert group.mapping == [1, 3, 0, 1] and group.hidden == {0}  # Numbers leaves blank dates out; Excel puts them first
+    weekday = SimpleNamespace(grouping_functor=SimpleNamespace(formula=SimpleNamespace(AST_node_array=SimpleNamespace(
+        AST_node=rpn("x", "WEEKDAY/1")))))
+    assert pivot_tables.native_group(weekday, dates, keys) is None
+    listed = pivot_tables.discrete_group(dates, {0: 3, 1: 2, 2: pivot_tables.Excluded, 3: 3}, {3: "Tuesday", 2: "Monday"})
+    assert listed.items == ["Tuesday", "Monday", "(blank)"] and listed.mapping == [0, 1, 2, 0] and listed.hidden == {2}
+
+
+def synthetic_pivot(columns, records, rows, cols, data, data_on_rows=False, no_subtotals=()):
+    """A pivot_tables.Spec over `records` (one value per column) with the row and column fields
+    given by column index (items in Excel's A to Z order) and values as (column, kind, name),
+    laid out."""
+    spec = pivot_tables.Spec()
+    spec.records, spec.included, spec.data_on_rows = len(records), [True] * len(records), data_on_rows
+    spec.fields = [pivot_tables.CacheField(name, [r[i] for r in records]) for i, name in enumerate(columns)]
+
+    def axis(i):
+        shared = spec.fields[i].share()
+        order = sorted(range(len(shared)), key=lambda x: pivot_tables.sort_key(shared[x]))
+        position = {x: p for p, x in enumerate(order)}
+        made = pivot_tables.Axis(i, [{"x": x, "caption": None, "hidden": False, "key": None} for x in order],
+                                 [position[x] for x in spec.fields[i].index])
+        made.subtotals = i not in no_subtotals
+        return made
+    spec.rows, spec.cols = [axis(i) for i in rows], [axis(i) for i in cols]
+    spec.data = [pivot_tables.DataField(i, kind, name, None) for i, kind, name in data]
+    spec.values = [spec.fields[d.field].values for d in spec.data]
+    pivot_tables.render(spec)
+    return spec
+
+
+def test_pivot_layout_matches_excel():
+    # Excel checks a PivotTable's list of row and column items against its layout when it opens
+    # the file. These are the lists, layouts and cells Excel itself saved for the same pivots.
+    rows = [("a1", "b1", "c1", "d1", 1.0), ("a1", "b1", "c2", "d2", 2.0), ("a1", "b2", "c1", "d1", 3.0),
+            ("a2", "b1", "c1", "d2", 4.0), ("a2", "b2", "c2", "d1", 5.0), ("a2", "b2", "c1", "d1", 6.0),
+            ("a1", "b2", "c2", "d2", 7.0)]
+    names = ("A", "B", "C", "D", "V")
+    spec = synthetic_pivot(names, rows, [0, 1, 2], [3], [(4, "sum", "V (Sum)")])
+    g = spec.grid
+    assert (g.rows, g.cols, g.first_header_row, g.first_data_row, g.first_data_col) == (16, 6, 1, 2, 3)
+    assert pivot_tables.items_xml(g.row_items) == (
+        'count="14"><i><x/><x/><x/></i><i r="2"><x v="1"/></i><i t="default" r="1"><x/></i><i r="1"><x v="1"/><x/></i>'
+        '<i r="2"><x v="1"/></i><i t="default" r="1"><x v="1"/></i><i t="default"><x/></i><i><x v="1"/><x/><x/></i>'
+        '<i t="default" r="1"><x/></i><i r="1"><x v="1"/><x/></i><i r="2"><x v="1"/></i><i t="default" r="1"><x v="1"/></i>'
+        '<i t="default"><x v="1"/></i><i t="grand"><x/></i>')
+    text = lambda r, c: g.cells[(r, c)].value if (r, c) in g.cells else None  # noqa: E731
+    assert [text(0, c) for c in range(6)] == ["V (Sum)", None, None, "D", None, None]
+    assert [text(4, c) for c in range(6)] == [None, "b1 Total", None, 1, 2, 3]
+    assert [text(15, c) for c in range(6)] == ["Grand Total", None, None, 15, 13, 28]
+
+    spec = synthetic_pivot(names, rows, [0, 1], [], [(4, "sum", "V (Sum)"), (4, "average", "V (Average)")], data_on_rows=True)
+    g = spec.grid
+    assert (g.rows, g.cols, g.first_data_row, g.first_data_col) == (15, 4, 1, 3)
+    assert pivot_tables.items_xml(g.row_items).startswith(
+        'count="14"><i><x/><x/><x/></i><i r="2" i="1"><x v="1"/></i><i r="1"><x v="1"/><x/></i><i r="2" i="1"><x v="1"/></i>'
+        '<i t="default"><x/></i><i t="default" i="1"><x/></i>')
+    assert [g.cells[(5, 0)].value, g.cells[(14, 0)].value, g.cells[(14, 3)].value] == ["a1 V (Sum)", "Total V (Average)", 4]
+
+    spec = synthetic_pivot(names, rows, [], [0, 3], [(4, "sum", "V (Sum)"), (4, "count", "V (Count)")])
+    g = spec.grid
+    assert (g.rows, g.cols, g.first_header_row, g.first_data_row, g.first_data_col) == (5, 14, 1, 4, 0)
+    group = '<i r="1"><x v="1"/><x/></i><i r="2" i="1"><x v="1"/></i>'
+    assert pivot_tables.items_xml(g.col_items) == (
+        'count="14"><i><x/><x/><x/></i><i r="2" i="1"><x v="1"/></i>' + group + '<i t="default"><x/></i><i t="default" i="1"><x/></i>'
+        '<i><x v="1"/><x/><x/></i><i r="2" i="1"><x v="1"/></i>' + group + '<i t="default"><x v="1"/></i>'
+        '<i t="default" i="1"><x v="1"/></i><i t="grand"><x/></i><i t="grand" i="1"><x/></i>')
+    assert pivot_tables.items_xml(g.row_items) == 'count="1"><i/>'
+    assert [g.cells[(1, c)].value for c in (4, 5, 12, 13)] == ["a1 V (Sum)", "a1 V (Count)", "Total V (Sum)", "Total V (Count)"]
+    assert [g.cells[(4, c)].value for c in (4, 5, 12, 13)] == [13, 4, 28, 7]
+
+    spec = synthetic_pivot(names, rows, [0, 1, 2], [], [(4, "sum", "V (Sum)")], no_subtotals=(1,))
+    assert [e[0] for e in spec.grid.row_items].count("default") == 2  # only A's groups have subtotals
+
+
+def test_pivot_cache_items():
+    # The pivot cache says what each field holds as Excel does, or Excel asks to repair the file.
+    shared = pivot_tables.shared_items_xml
+    assert shared([1.0, "text", None, 2.5, 3.0, "zz"], None) == \
+        '<sharedItems containsBlank="1" containsMixedTypes="1" containsNumber="1" minValue="1" maxValue="3"/>'
+    assert shared([211.0, 476.0], None) == \
+        '<sharedItems containsSemiMixedTypes="0" containsString="0" containsNumber="1" containsInteger="1" minValue="211" maxValue="476"/>'
+    when = [dt.datetime(2021, 1, 1, 6), None, dt.datetime(2021, 1, 6, 12)]
+    assert shared(when, when) == ('<sharedItems containsNonDate="0" containsDate="1" containsString="0" containsBlank="1" '
+                                  'minDate="2021-01-01T06:00:00" maxDate="2021-01-06T12:00:00" count="3">'
+                                  '<d v="2021-01-01T06:00:00"/><m/><d v="2021-01-06T12:00:00"/></sharedItems>')
+    assert shared(["A", "B"], ["A", "B"]) == '<sharedItems count="2"><s v="A"/><s v="B"/></sharedItems>'
+    assert pivot_tables.value_xml("a\nb & <c>") == '<s v="a&#10;b &amp; &lt;c&gt;"/>'
 
 
 def rpn(*tokens):
@@ -584,7 +857,9 @@ def test_change_report():
     assert not highlighted["changes"] and "Conditional highlighting in 1 table" in highlighted["kept"]
     custom = {c["kind"]: c for c in report("test-custom-formats")["changes"]}
     assert "DURATION" in custom["formulas"]["detail"] and custom["formats"]["title"].endswith("custom number format")
-    assert any(n["kind"] == "pivot-values" for n in report("test-pivot")["notes"])
+    pivot_report = report("test-pivot")
+    assert not pivot_report["changes"] and not any(n["kind"] == "pivot-values" for n in pivot_report["notes"])
+    assert "2 pivot tables as Excel PivotTables, with the same fields, groups, totals and order" in pivot_report["kept"]
     fonts = next(n for n in report("test-styles")["notes"] if n["kind"] == "fonts")
     assert "Helvetica Neue → Arial" in fonts["detail"]
     assert not report("test-styles")["changes"]

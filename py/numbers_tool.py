@@ -31,6 +31,7 @@ import charts
 import drawings
 import extras
 import highlights
+import pivot_tables
 import pivots
 import strokes
 from layout import SHEET, TABLES, Footprint, Layout, spans
@@ -316,6 +317,8 @@ class Book:
                 self.highlights[table._table_id] = rules
         # Pivot tables whose summary values have to be recalculated: {table_id: {(row, col): (value, source cell)}}
         self.pivot_values = {}
+        self.native_pivots = {}  # {table_id: pivot_tables.Spec} for those that become Excel PivotTables
+        readable = []
         for _, table in self.tables:
             try:
                 pivot = pivots.pivot_for(table)
@@ -326,6 +329,8 @@ class Book:
                 self.pivot_values[table._table_id] = pivot.values
                 if pivot.missing:
                     self.unsupported["pivots"] += 1
+                else:
+                    readable.append((table, pivot))
         self.groupings = {}  # {table_id: categories.Grouping} for tables grouped into categories
         for _, table in self.tables:
             try:
@@ -335,6 +340,8 @@ class Book:
                 continue
             if view is not None:
                 self.groupings[table._table_id] = view
+        for table, pivot in readable:
+            native_pivot(self, table, pivot)
         self.layouts = {}
 
     def layout(self, options=None):
@@ -358,6 +365,57 @@ CATEGORY_TOOLS = SimpleNamespace(
     number_format=lambda cell: excel_number_format(cell) if is_numeric(cell) else None,
     filled=lambda cell: not isinstance(cell, (EmptyCell, MergedCell)) and cell.value not in (None, ""),
     hidden=lambda table: extras.hidden(table, columns=False))
+
+
+def native_pivot(book, table, pivot):
+    """Works out the Excel PivotTable for a pivot table; one Excel can't show the same way is
+    written as values instead (see pivot_tables)."""
+    try:
+        book.native_pivots[table._table_id] = pivot_tables.build(book, table, pivot, PIVOT_TOOLS)
+    except Exception:  # pivots.Unsupported, or anything unexpected: the values are still right
+        book.native_pivots.pop(table._table_id, None)
+
+
+def region_style(table, fill_style, text_style):
+    """A pivot table's look for the rows and columns Numbers adds to it (subtotals and grand
+    totals), from the table's own styles for them: a fill and a font, as in cell_style ("b": 0
+    and "color": None where they turn off the look of the cells they're drawn over)."""
+    model = table._model
+    tm = model.objects[table._table_id]
+    s = {}
+    try:
+        fill = model.objects[getattr(tm, fill_style).identifier].cell_properties.cell_fill
+        if fill.HasField("color"):
+            s["bg"] = rgb_hex(rgb_from_proto(fill.color))
+    except Exception:
+        pass
+    try:
+        style = model.objects[getattr(tm, text_style).identifier]
+        font = model.char_property(style, "font_name")
+        note_font(model, font)
+        s["b"] = 1 if model.char_property(style, "bold") or font_is_bold(font) else 0
+        s["i"] = 1 if model.char_property(style, "italic") else 0
+        colour = rgb_hex(rgb_from_proto(model.char_property(style, "font_color")))
+        s["color"] = None if colour == "#000000" else colour
+    except Exception:
+        pass
+    return s
+
+
+# What pivot_tables.py needs from here (lambdas, as the functions are defined further down).
+PIVOT_TOOLS = SimpleNamespace(
+    text=lambda cell: "" if cell is None or isinstance(cell, (EmptyCell, MergedCell)) else formatted(cell),
+    number_format=lambda cell: excel_number_format(cell),
+    auto_format=lambda fmt, value: builtin_number_format(fmt, value),
+    default_format=SimpleNamespace(format_type=FormatType.DECIMAL, decimal_places=DECIMAL_PLACES_AUTO,
+                                   show_thousands_separator=True, negative_style=0, currency_code="USD",
+                                   use_accounting_style=False, fraction_accuracy=0),
+    style=lambda cell: cell_style(cell),
+    table_style=lambda table, fill, text: region_style(table, fill, text),
+    lines=lambda table, rows, cols, hr, hc, fr: strokes.style_lines(
+        table._model, table._model.objects[table._table_id], rows, cols, hr, hc, fr),
+    header_sizes=lambda table, columns: header_sizes(table, columns),
+)
 
 
 def footprint(book, table):
@@ -384,6 +442,9 @@ def footprint(book, table):
     cols = [(max(6.0, width), c in hidden_cols) for c, width in enumerate(header_sizes(table, columns=True))]
     if view is not None:
         cols.insert(0, (view.width, False))
+    native = book.native_pivots.get(table._table_id)
+    if native is not None:  # laid out as Excel lays out a PivotTable, with its totals
+        rows, cols = [(height, False) for height in native.heights], [(max(6.0, width), False) for width in native.widths]
     if title:
         rows.insert(0, (title_height(title), False))
     try:
@@ -1134,8 +1195,9 @@ def change_report(book, layout):
                         "detail": ("It has" if len(dropped) == 1 else f"{names} have") + " no tables, charts, text boxes or "
                                   "images, so there’s nothing for an Excel sheet to show."})
 
-    if book.pivot_values:
-        n = len(book.pivot_values)
+    as_values = [t for t in book.pivot_values if t not in book.native_pivots]
+    if as_values:
+        n = len(as_values)
         notes.append({"kind": "pivot-values", "title": f"{counted(n, 'pivot table')} {'is' if n == 1 else 'are'} saved as values",
                       "detail": "The totals are recalculated and match Numbers, but in Excel they’re plain values, not a "
                                 "PivotTable you can rearrange."})
@@ -1172,6 +1234,10 @@ def change_report(book, layout):
         (sum(d.kind == "image" for d in placed), "image", "images")) if n]
     if drawn:
         kept.append(drawn[0] if len(drawn) == 1 else ", ".join(drawn[:-1]) + " and " + drawn[-1])
+    if book.native_pivots:
+        n = len(book.native_pivots)
+        kept.append(f"{counted(n, 'pivot table')} as {'an Excel PivotTable' if n == 1 else 'Excel PivotTables'}, "
+                    "with the same fields, groups, totals and order")
     if live:
         kept.append(f"{counted(live, 'formula')} that {'keeps' if live == 1 else 'keep'} calculating in Excel")
     if book.groupings:
@@ -1250,6 +1316,16 @@ def preview_sheet(book, layout, ws):
                   "i": 1 if title["italic"] else 0, "color": title["color"], "bg": background, "ha": "center", "va": "middle"}
             grid[placed.title_row][placed.col] = [title["text"], style_index({k: v for k, v in st.items() if v})]
             merge(placed.title_row, placed.col, placed.title_row, placed.col + placed.width - 1)
+        native = book.native_pivots.get(table._table_id)
+        if native is not None:  # as Excel lays the PivotTable out; its field buttons show drop-down arrows
+            for r, c, value, st, num_format, cell in pivot_tables.cells(native, PIVOT_TOOLS):
+                row, col = placed.row + r, placed.col + c
+                if row < rows_shown and col < cols_shown:
+                    text = "" if value is None else value if isinstance(value, str) else format_number(value, num_format)
+                    index = style_index(st)
+                    grid[row][col] = [text, index, {"control": "popup"}] if cell and cell.role == "button" else (
+                        [text, index] if index else text)
+            continue
         computed = book.pivot_values.get(table._table_id, {})
         rules = {}  # highlighting rules by key, to show what they highlight as Excel will
         for rule in table_highlights(layout, book.sheet_name_of[table._table_id], table)[0]:
@@ -2020,6 +2096,8 @@ class FormatCache:
                 props[f"{side}_color"] = color
         if num_format:
             props["num_format"] = num_format
+        if style.get("button"):  # a PivotTable field button: kept apart (pivot_tables.add_parts marks it)
+            props["hidden"] = True
         fmt = self.workbook.add_format(props)
         self.cache[key] = fmt
         return fmt
@@ -2120,6 +2198,7 @@ def convert(path, out, password=None, layout_options=None, contents=False):
     lists = ListSheet(workbook)
     stats = {"formulas": 0, "formulasAsValues": 0}
     refs = referenced_cells(layout)
+    pivots_written = pivot_tables.Pending()
     worksheets = {}
     # Added first so it's the first tab; filled in once every table has its place.
     contents_sheet = workbook.add_worksheet(unique_sheet_name("Contents", set(layout.used_names))) if contents else None
@@ -2142,7 +2221,7 @@ def convert(path, out, password=None, layout_options=None, contents=False):
         if plan.autofilter:
             sheet.autofilter(*plan.autofilter)
         for placed in plan.tables:
-            write_table(sheet, placed, layout, formats, lists, stats, refs.get(plan.name, []))
+            write_table(sheet, placed, layout, formats, lists, stats, refs.get(plan.name, []), pivots_written)
 
     def cell_info(cell):  # a table cell's value and number format, for chart data copied to another sheet
         table_id, r, c = cell
@@ -2160,6 +2239,13 @@ def convert(path, out, password=None, layout_options=None, contents=False):
     except xlsxwriter.exceptions.FileCreateError as err:  # usually the file is open in Excel
         raise UserError("Couldn't save the Excel file. If it's open in Excel, close it and try again.",
                         reason="save", details=technical(err, out)) from None
+    stats["pivots"] = len(pivots_written.tables)
+    if pivots_written:
+        try:
+            pivot_tables.add_parts(out, pivots_written)
+        except Exception:  # the PivotTables' cells are written; never lose the file over their definitions
+            traceback.print_exc(file=sys.stderr)
+            stats["pivots"] = 0
     return {"outputPath": out, "sheets": len(layout.sheets), "contents": contents_sheet is not None,
             "unsupported": book.unsupported, **stats}
 
@@ -2191,7 +2277,7 @@ def write_contents(ws, layout, formats, file_name):
             row += 1
 
 
-def write_table(sheet, placed, layout, formats, lists, stats, sheet_refs):
+def write_table(sheet, placed, layout, formats, lists, stats, sheet_refs, pivots_written=None):
     table = placed.table
     book = layout.book
     sheet_name = book.sheet_name_of[table._table_id]
@@ -2200,6 +2286,10 @@ def write_table(sheet, placed, layout, formats, lists, stats, sheet_refs):
         write_title(sheet, placed.title_row, placed.col, title, placed.width, formats,
                     SHEET_BACKGROUNDS.get((id(table._model), table._table_id)))
     ws = OffsetSheet(sheet, placed)
+    native = book.native_pivots.get(table._table_id)
+    if native is not None and pivots_written is not None:
+        write_pivot(sheet, ws, placed, native, layout, formats, pivots_written)
+        return
 
     merged_anchors = {}
     for rng in table.merge_ranges:
@@ -2250,6 +2340,16 @@ def write_grouped(sheet, placed, formats):
             sheet.write_string(r, c, value, fmt)
         else:
             sheet.write_number(r, c, value, fmt)
+
+
+def write_pivot(sheet, ws, placed, spec, layout, formats, pivots_written):
+    """A pivot table as an Excel PivotTable: its cells now, and its definition, reading the converted
+    source table's cells, once XlsxWriter has saved the file (pivot_tables.add_parts)."""
+    source, s = layout.place[spec.source.table._table_id], spec.source
+    ref = (f"{column_letters(source.col + s.first)}{source.row + s.header_row + 1}:"
+           f"{column_letters(source.col + s.last)}{source.row + s.last_row + 1}")
+    used = pivot_tables.write(ws, spec, formats, PIVOT_TOOLS, lambda style: formats.get({**style, "button": 1}, None))
+    pivots_written.add(sheet.name, spec, (placed.row, placed.col), source.sheet, ref, used)
 
 
 def write_special(ws, r, c, cell, style, fmt, formats, referenced=lambda: False):
