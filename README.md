@@ -105,7 +105,14 @@ py -3.11 -m venv .venv
 npm start        # run the app
 npm test         # helper tests + Node bridge tests (uses real Numbers files in test/fixtures)
 npm run dist     # build the helper, then the installer and the portable zip in dist/
+npm run test:ui  # UI smoke test: drives the window of the app built in dist/win-unpacked
 ```
+
+The UI smoke test ([`test/ui/smoke.test.js`](test/ui/smoke.test.js)) runs on every CI build, and nothing is released
+unless it passes. It opens every file in `test/fixtures` the ways a user would, previews and saves each one and goes
+through the app's screens, with a profile of its own, so it never touches your settings or an open copy of the app.
+`npm run test:ui -- --source` tests `src/` without building. To test more files, drop them in a folder in
+`test/fixtures`; [`test/ui/expectations.js`](test/ui/expectations.js) lists what particular files must show.
 
 ### Measuring against Apple's own export
 
