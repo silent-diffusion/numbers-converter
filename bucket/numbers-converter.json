@@ -1,19 +1,25 @@
 {
-    "version": "1.11.0",
+    "version": "1.12.0",
     "description": "Convert Apple Numbers (.numbers) spreadsheets to Excel, offline.",
     "homepage": "https://github.com/silent-diffusion/numbers-converter",
     "license": "MIT",
-    "notes": "Scoop keeps Numbers Converter up to date: run \"scoop update numbers-converter\".",
+    "notes": "Scoop keeps Numbers Converter up to date: run \"scoop update numbers-converter\". To convert files from a terminal, run \"numbers-converter --help\".",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/silent-diffusion/numbers-converter/releases/download/v1.11.0/NumbersConverter-1.11.0-win-x64.zip",
-            "hash": "deacf1d9d1c6a5b1f98c60725988345f5aaa553fb3f2ab58e288459529ca0a93"
+            "url": "https://github.com/silent-diffusion/numbers-converter/releases/download/v1.12.0/NumbersConverter-1.12.0-win-x64.zip",
+            "hash": "e07a9d196c2af0457796526fe1cef53c6f2c5dfe1768b5a015aa3a2a6ad5fdb7"
         }
     },
     "shortcuts": [
         [
             "Numbers Converter.exe",
             "Numbers Converter"
+        ]
+    ],
+    "bin": [
+        [
+            "resources\\numbers-tool\\numbers-tool.exe",
+            "numbers-converter"
         ]
     ],
     "checkver": {
