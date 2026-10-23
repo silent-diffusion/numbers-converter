@@ -95,7 +95,7 @@ async function launch(files) {
   const profile = `--user-data-dir=${PROFILE}`;
   electronApp = await electron.launch({
     ...(SOURCE ? { args: [ROOT, profile, ...files] } : { executablePath: EXE, args: [profile, ...files] }),
-    cwd: SCRATCH,
+    cwd: os.tmpdir(), // not the scratch folder, which a process still exiting would keep from being deleted
     env: appEnv(),
     timeout: 90000
   });
@@ -172,7 +172,7 @@ async function launchAgain(files) {
 
 function kill() {
   if (mainPid && isRunning(mainPid)) {
-    try { execFileSync('taskkill', ['/pid', String(mainPid), '/t', '/f'], { stdio: 'ignore' }); } catch { /* gone */ }
+    try { execFileSync('taskkill', ['/pid', String(mainPid), '/t', '/f'], { stdio: 'ignore', timeout: 60000 }); } catch { /* gone */ }
   }
 }
 
@@ -195,7 +195,7 @@ function isRunning(pid) {
 function childProcesses(pid) {
   const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
     `Get-CimInstance Win32_Process -Filter "ParentProcessId=${pid}" | ForEach-Object { "$($_.ProcessId) $($_.Name)" }`],
-  { encoding: 'utf8' });
+  { encoding: 'utf8', timeout: 60000 });
   return out.trim().split(/\r?\n/).filter(Boolean).map((line) => {
     const [id, ...name] = line.trim().split(' ');
     return { pid: Number(id), name: name.join(' ') };
@@ -488,9 +488,11 @@ const STEPS = [
     const data = { items: [], files: [images.path, path.join(WORK, 'notes.txt')], dragOperationsMask: 1 };
     for (const type of ['dragEnter', 'dragOver', 'drop']) await cdp.send('Input.dispatchDragEvent', { type, ...at, data });
     await cdp.detach();
-    await settled([images.path]);
+    // The toast shows at once and hides itself after 7 s, so it's checked before the file has opened.
+    await win.locator('#toast').waitFor();
     assert.strictEqual(await win.locator('#toast-text').textContent(), 'Skipped 1 item that isn’t a Numbers file: notes.txt.');
     await win.locator('#toast-close').click();
+    await settled([images.path]);
   }],
 
   ['Choose files (+ and Ctrl+O) opens files from the file dialog', async () => {
@@ -647,7 +649,7 @@ const STEPS = [
 // uncaught error, a failed save, the converter's error output, an update check) is a problem.
 async function collectProblems() {
   if (electronApp && !appClosed) {
-    const rejections = await electronApp.evaluate(() => globalThis.uiTest.rejections.splice(0)).catch(() => []);
+    const rejections = await withTimeout(electronApp.evaluate(() => globalThis.uiTest.rejections.splice(0)), 5000).catch(() => []);
     problems.push(...rejections.map((r) => `Unhandled rejection in the main process: ${r}`));
   }
   if (fs.existsSync(LOG)) {
@@ -696,6 +698,14 @@ async function step(name, fn) {
   const tested = SOURCE ? 'the app in src/' : EXE.startsWith(ROOT) ? path.relative(ROOT, EXE) : EXE;
   console.log(`UI smoke test of ${tested}, with ${FILES.length} files from test/fixtures`);
   fs.rmSync(RESULTS, { recursive: true, force: true });
+  // A last resort, within CI's 10 minutes for the step: if something hangs past every other timeout,
+  // keep what there is to see and stop.
+  setTimeout(async () => {
+    console.error('\nThe UI smoke test took over 9 minutes, so it was stopped.');
+    await saveEvidence('stopped after 9 minutes', new Error('The test took over 9 minutes.')).catch(() => {});
+    kill();
+    process.exit(1);
+  }, 9 * 60 * 1000).unref();
   let failed = null;
   try {
     checkBuild();
@@ -710,7 +720,11 @@ async function step(name, fn) {
     console.error(`\n${failed.stack || failed}\n\nScreenshot and logs: ${RESULTS}\nScratch folder: ${SCRATCH}`);
     process.exitCode = 1;
   } else {
-    fs.rmSync(SCRATCH, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+    try {
+      fs.rmSync(SCRATCH, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+    } catch (err) {
+      console.log(`  (couldn’t delete the scratch folder ${SCRATCH}: ${err.message})`);
+    }
     console.log(`All UI smoke tests passed (${seconds(started)}).`);
   }
 })();
