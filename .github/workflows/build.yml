@@ -1,4 +1,5 @@
-# Builds and tests the Windows installer and portable zip on every push and pull request.
+# Builds and tests the Windows installer and portable zip on every push and pull request (the helper and
+# bridge tests, then a smoke test of the built app's window).
 # Pushing a version tag (v1.2.3, matching package.json) also publishes them: the GitHub release
 # with the files installed copies read to update, SHA-256 checksums and build provenance; then
 # the Scoop manifest in bucket/ and, once a WINGET_TOKEN secret is set up, a winget pull request.
@@ -53,6 +54,20 @@ jobs:
         run: npm run dist
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      # Drives the window of the app just built (dist/win-unpacked); nothing is released if it fails.
+      - name: UI smoke test
+        run: npm run test:ui
+        timeout-minutes: 10
+
+      - name: Keep the UI smoke test's screenshots and logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-test-results
+          path: test-results/ui
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Checksums
         shell: pwsh

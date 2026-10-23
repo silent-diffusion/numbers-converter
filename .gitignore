@@ -8,3 +8,4 @@ py/dist/
 reference/
 __pycache__/
 *.pyc
+test-results/
