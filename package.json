@@ -1,14 +1,15 @@
 {
   "name": "numbers-converter",
   "productName": "Numbers Converter",
-  "version": "1.11.0",
+  "version": "1.12.0",
   "description": "Convert Apple Numbers files to Excel, offline.",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "test": ".venv\\Scripts\\python -W ignore py/test_numbers_tool.py && node test/convert.test.js && node test/updater.test.js",
+    "test": ".venv\\Scripts\\python -W ignore py/test_numbers_tool.py && node test/convert.test.js && node test/updater.test.js && node test/cli.test.js",
     "test:ui": "node test/ui/smoke.test.js",
-    "build:helper": ".venv\\Scripts\\pyinstaller --noconfirm --onedir --name numbers-tool --distpath py/dist --workpath py/build --specpath py/build --collect-submodules numbers_parser --collect-data numbers_parser --exclude-module numpy --exclude-module openpyxl --exclude-module tkinter py/numbers_tool.py",
+    "test:cli": "node test/cli.test.js --built",
+    "build:helper": ".venv\\Scripts\\pyinstaller --noconfirm --onedir --name numbers-tool --distpath py/dist --workpath py/build --specpath py/build --collect-submodules numbers_parser --collect-data numbers_parser --exclude-module numpy --exclude-module openpyxl --exclude-module tkinter py/numbers_tool.py && node -p \"require('./package.json').version\" > py\\dist\\numbers-tool\\version.txt",
     "dist": "npm run build:helper && electron-builder --win --publish never"
   },
   "repository": {
@@ -44,6 +45,12 @@
       {
         "from": "py/dist/numbers-tool",
         "to": "numbers-tool"
+      }
+    ],
+    "extraFiles": [
+      {
+        "from": "build/numbers-converter.cmd",
+        "to": "numbers-converter.cmd"
       }
     ],
     "fileAssociations": [

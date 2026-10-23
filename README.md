@@ -28,7 +28,8 @@ gh attestation verify NumbersConverter-Setup-x.y.z.exe --repo silent-diffusion/n
 
 ## Use
 
-- Drag `.numbers` files onto the window, or click **Choose files** (Ctrl+O). Each file opens in a preview of its sheets, cells, formatting, charts, text boxes and images as they'll be in Excel. Files a Mac saved as a *package* (a folder ending in `.numbers`) can be dragged in too, or opened with **Open a Mac package folder**.
+- Drag `.numbers` files onto the window, or click **Choose files** (Ctrl+O). Each file opens in a preview of its sheets, cells, formatting, charts, text boxes and images as they'll be in Excel. Files a Mac saved as a *package* (a folder ending in `.numbers`) can be dragged in too, or opened with **Choose a folder**.
+- Drag in a folder, or choose one with **Choose a folder** (or **⋯ → Add a folder**), and every Numbers file in it and its subfolders opens, up to 200 at a time. For more at once, use the [command line](#command-line).
 - Before you save, the button beside **Convert & save** says whether the file **converts fully** or how many **changes** to check. It opens **What changes in Excel**, which lists:
   - formulas that keep their last value, with why and in which cells (**Show** jumps to each one);
   - things that can't be converted, such as bubble charts, pictures in a format Excel can't show, or highlighting rules Excel can't calculate;
@@ -66,6 +67,46 @@ Not carried over yet: bubble charts, pictures Excel can't show that have no prev
 
 Password-protected files ask for the password and show its hint; the password is only kept in memory while the app is open.
 
+## Command line
+
+The app comes with a `numbers-converter` command, which converts files and whole folders without opening the
+window, for batches and scripts. It saves the same Excel files the app does, on your PC, and never writes over a
+file unless you ask it to.
+
+- Installed with Scoop, it's on your PATH: run `numbers-converter --help`.
+- Otherwise it's in the app's folder, and **Settings → Help → Command line** shows how to run it, ready to copy. For
+  the installer's copy, in PowerShell:
+
+  ```powershell
+  & "$env:LOCALAPPDATA\Programs\numbers-converter\numbers-converter.cmd" --help
+  ```
+
+  To run it as just `numbers-converter`, add that folder to your PATH.
+
+```powershell
+numbers-converter Budget.numbers                     # Budget.xlsx, next to it
+numbers-converter C:\Reports --out D:\Excel          # every Numbers file in Reports and its subfolders, into the same subfolders in D:\Excel
+numbers-converter *.numbers --layout one --contents  # wildcards work; One sheet, with a Contents sheet
+numbers-converter C:\Reports --dry-run               # what would be saved, and what changes in Excel, saving nothing
+numbers-converter C:\Reports --json > summary.json   # a summary for scripts
+```
+
+- `--out FOLDER`: save the Excel files there instead of next to the originals. Files found in subfolders go in the
+  same subfolders there.
+- `--layout separate` or `--layout one`: how sheets with more than one table are saved, as in Settings. Separate
+  sheets is the default.
+- `--contents`: start each Excel file with a Contents sheet.
+- `--overwrite`: write over Excel files that are already there, instead of adding " (1)" to the name.
+- `--password-file FILE`: the password for locked files, on the first line of FILE. In a terminal, the command asks
+  for any password it needs instead.
+- `--dry-run`: say what would be saved where, and what changes in Excel, without saving anything.
+- `--json`: print a summary in JSON. For each file, it has its status (`saved`; `ready` in a dry run; `locked` or
+  `failed`, with why), where its copy went, and the changes **What changes in Excel** lists.
+
+It exits with 0 when every file was saved, 1 when a file couldn't be converted or needs a password, and 2 when no
+Numbers files were found or the command has a mistake in it. It doesn't use the app's settings: it does what the
+command says.
+
 ## Updates
 
 **Settings → Updates**
@@ -96,16 +137,19 @@ charts in [`py/charts.py`](py/charts.py), text boxes, shapes and images in [`py/
 conditional highlighting in [`py/highlights.py`](py/highlights.py), tables grouped into categories in
 [`py/categories.py`](py/categories.py) and sheet layout in [`py/layout.py`](py/layout.py), built on
 [numbers-parser](https://github.com/masaccio/numbers-parser) and [XlsxWriter](https://xlsxwriter.readthedocs.io/)).
-The installer ships it as a standalone PyInstaller build, so users don't need Python.
+The installer ships it as a standalone PyInstaller build, so users don't need Python. Started without `--serve`,
+the same build is the `numbers-converter` command ([`py/cli.py`](py/cli.py), which also finds the Numbers files in
+folders opened in the app), run by [`build/numbers-converter.cmd`](build/numbers-converter.cmd) beside the app.
 
 ```bash
 npm install
 py -3.11 -m venv .venv
 .venv\Scripts\pip install -r py/requirements.txt
 npm start        # run the app
-npm test         # helper tests + Node bridge tests (uses real Numbers files in test/fixtures)
-npm run dist     # build the helper, then the installer and the portable zip in dist/
-npm run test:ui  # UI smoke test: drives the window of the app built in dist/win-unpacked
+npm test          # helper, Node bridge and command-line tests (uses real Numbers files in test/fixtures)
+npm run dist      # build the helper, then the installer and the portable zip in dist/
+npm run test:ui   # UI smoke test: drives the window of the app built in dist/win-unpacked
+npm run test:cli  # the numbers-converter command as the app built in dist/win-unpacked ships it
 ```
 
 The UI smoke test ([`test/ui/smoke.test.js`](test/ui/smoke.test.js)) runs on every CI build, and nothing is released

@@ -1,0 +1,2 @@
+# Windows runs batch files line by line, and some lines go wrong with Unix line endings.
+*.cmd text eol=crlf

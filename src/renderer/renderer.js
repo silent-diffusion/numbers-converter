@@ -102,11 +102,8 @@ function iconButton(name, label, cls = 'icon-btn') {
 
 async function openFiles(paths) {
   const accepted = paths.filter(isNumbersPath);
-  const skipped = paths.filter((p) => !isNumbersPath(p));
-  if (skipped.length) {
-    const what = skipped.length === 1 ? '1 item that isn’t a Numbers file' : `${skipped.length} items that aren’t Numbers files`;
-    toast(`Skipped ${what}: ${listNames(skipped.map(baseName))}.`);
-  }
+  const others = paths.filter((p) => !isNumbersPath(p));
+  if (others.length) accepted.push(...await searchFolders(others));
   if (!accepted.length) return;
   view = 'main';
   const added = accepted.map((p) => {
@@ -125,6 +122,32 @@ async function openFiles(paths) {
   for (const f of added) {
     if (f.status === 'loading') await load(f);
   }
+}
+
+// The Numbers files in folders that were opened (with their subfolders), and a note on what was left out:
+// items that aren't Numbers files or folders, folders with no Numbers files, and any past the first 200.
+async function searchFolders(paths) {
+  let looking = false;
+  const slow = setTimeout(() => { looking = true; toast('Looking for Numbers files…', { timeout: 60000 }); }, 600);
+  const found = await window.api.find(paths);
+  clearTimeout(slow);
+  if (!found.ok) {
+    toast(found.error);
+    return [];
+  }
+  const notes = [];
+  if (found.skipped.length) {
+    const what = found.skipped.length === 1 ? '1 item that isn’t a Numbers file' : `${found.skipped.length} items that aren’t Numbers files`;
+    notes.push(`Skipped ${what}: ${listNames(found.skipped.map(baseName))}.`);
+  }
+  if (found.missing.length) notes.push(`Couldn’t find ${listNames(found.missing.map(baseName))}.`);
+  if (found.empty.length) notes.push(`No Numbers files in ${listNames(found.empty.map(baseName))}.`);
+  if (found.more) {
+    notes.push(`Opened the first ${plural(found.files.length, 'Numbers file')} found. To convert more at once, use the numbers-converter command (see Settings).`);
+  }
+  if (notes.length) toast(notes.join(' '), { timeout: found.more ? 12000 : 7000 });
+  else if (looking) hideToast();
+  return found.files.map((f) => f.path);
 }
 
 // How the file's Numbers sheets with several tables are laid out: the setting, unless switched in the preview.
@@ -886,9 +909,9 @@ $('#toast-close').onclick = hideToast;
 /* ---------- Buttons, drag & drop, keyboard ---------- */
 
 const pick = async () => openFiles(await window.api.pickFiles());
-const pickPackages = async () => {
+const pickFolders = async () => {
   hideMenu();
-  openFiles(await window.api.pickPackages());
+  openFiles(await window.api.pickFolders());
 };
 
 function showSettings(on) {
@@ -900,8 +923,8 @@ function showSettings(on) {
 
 $('#pick').onclick = pick;
 $('#add').onclick = pick;
-$('#pick-packages').onclick = pickPackages;
-$('#menu-packages').onclick = pickPackages;
+$('#pick-folder').onclick = pickFolders;
+$('#menu-folder').onclick = pickFolders;
 $('#menu-clear').onclick = clearAll;
 $('#convert-all').onclick = convertAll;
 $('#settings-btn').onclick = () => showSettings(view !== 'settings');
@@ -978,6 +1001,14 @@ function renderSettings() {
   $('#reset-out').hidden = !custom;
   $('#out-hint').textContent = custom ? `Excel copies are saved in ${folderLabel(custom)}.` : 'Excel copies are saved next to the originals.';
   $('#version-label').textContent = `Version ${appInfo.version}`;
+  // The numbers-converter command: run by name when Scoop put it on the PATH, otherwise by its full path.
+  const cli = appInfo.commandLine;
+  $('#cli-desc').textContent = cli
+    ? 'Converts files and folders from PowerShell or a script, without opening this window. To see how, run:'
+    : 'The installed app comes with the numbers-converter command, which converts files and folders from PowerShell or a script.';
+  $('#cli-command').textContent = cli ? (cli.onPath ? 'numbers-converter --help' : `& "${cli.command}" --help`) : '';
+  $('#cli-command').hidden = !cli;
+  $('#cli-copy').hidden = !cli;
   const source = el('button', 'link-btn small', 'Source code on GitHub');
   source.onclick = () => window.api.openLink('https://github.com/silent-diffusion/numbers-converter');
   $('#about').replaceChildren(document.createTextNode(`Numbers Converter ${appInfo.version} · Free and open source (MIT licence) · `), source);
@@ -1019,6 +1050,10 @@ $('#reset-out').onclick = async () => {
 };
 $('#report-general').onclick = () => openReport(null);
 $('#open-log').onclick = () => window.api.openLogFolder();
+$('#cli-copy').onclick = async () => {
+  await window.api.copy($('#cli-command').textContent);
+  toast('Copied the command. Paste it into PowerShell.', { good: true });
+};
 
 /* ---------- Updates ---------- */
 

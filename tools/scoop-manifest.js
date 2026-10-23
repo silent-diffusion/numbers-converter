@@ -14,9 +14,10 @@ const manifest = {
   description: 'Convert Apple Numbers (.numbers) spreadsheets to Excel, offline.',
   homepage: repo,
   license: 'MIT',
-  notes: 'Scoop keeps Numbers Converter up to date: run "scoop update numbers-converter".',
+  notes: 'Scoop keeps Numbers Converter up to date: run "scoop update numbers-converter". To convert files from a terminal, run "numbers-converter --help".',
   architecture: { '64bit': { url: zip(version), hash } },
   shortcuts: [['Numbers Converter.exe', 'Numbers Converter']],
+  bin: [['resources\\numbers-tool\\numbers-tool.exe', 'numbers-converter']], // the command, on the PATH
   checkver: { github: repo },
   autoupdate: { architecture: { '64bit': { url: zip('$version') } } }
 };

@@ -4,13 +4,14 @@ const { spawn } = require('child_process');
 
 // The Numbers reader/Excel writer is a Python helper (py/numbers_tool.py). The installed app ships it
 // as a PyInstaller build in resources/numbers-tool; in development it runs from the project's .venv.
+// --serve starts it as the app's helper; without it, it's the numbers-converter command.
 function helperCommand() {
   if (process.resourcesPath) {
     const exe = path.join(process.resourcesPath, 'numbers-tool', 'numbers-tool.exe');
-    if (fs.existsSync(exe)) return [exe, []];
+    if (fs.existsSync(exe)) return [exe, ['--serve']];
   }
   const root = path.join(__dirname, '..');
-  return [path.join(root, '.venv', 'Scripts', 'python.exe'), ['-u', path.join(root, 'py', 'numbers_tool.py')]];
+  return [path.join(root, '.venv', 'Scripts', 'python.exe'), ['-u', path.join(root, 'py', 'numbers_tool.py'), '--serve']];
 }
 
 let child = null;
@@ -96,4 +97,11 @@ function convertFile(inputPath, outputDir, password, layout, options = {}) {
   return request({ cmd: 'convert', path: inputPath, out, password, layout, contents: Boolean(options.contents) });
 }
 
-module.exports = { convertFile, previewFile, targetPath, stopHelper, setLogger };
+// The Numbers files in `paths`: .numbers files and Mac package folders, and those in folders and their
+// subfolders, up to 200 of them (see find() in py/cli.py). Resolves to { ok, files: [{ path, folder }],
+// skipped, missing, empty, more }. A search of over 20,000 folders stops there, as it was probably a mistake.
+function findFiles(paths) {
+  return request({ cmd: 'find', paths, limit: 200, maxFolders: 20000 });
+}
+
+module.exports = { convertFile, previewFile, findFiles, targetPath, stopHelper, setLogger };

@@ -1,9 +1,14 @@
 """Tests for numbers_tool.py, run with: .venv/Scripts/python py/test_numbers_tool.py"""
 
+import contextlib
 import datetime as dt
 import html
+import io
+import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -19,6 +24,7 @@ from openpyxl import load_workbook
 sys.path.insert(0, os.path.dirname(__file__))
 import categories  # noqa: E402
 import charts  # noqa: E402
+import cli  # noqa: E402
 import drawings  # noqa: E402
 import highlights  # noqa: E402
 import layout  # noqa: E402
@@ -1146,6 +1152,138 @@ def test_references_into_grouped_tables():
     assert why == ["category"]
     why = []
     assert nt.translate_formula(f"ROW(⟦{tid}|5|5|2|2|0⟧)", layout_, "Categories", why=why) is None and why == ["category"]
+
+
+def make_files(root, *names):
+    """Empty files under `root`, by their path there, with the folders they're in."""
+    for name in names:
+        path = os.path.join(root, *name.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").close()
+
+
+def test_finding_numbers_files_in_folders():
+    # A folder is searched with its subfolders, in name order (its own files first), for .numbers files
+    # and Mac package folders. Hidden files, what Macs leave behind, links and other files are left out.
+    root = tempfile.mkdtemp(prefix="find-", dir=OUT)
+    make_files(root, "Reports/Q10.numbers", "Reports/Q2.numbers", "Reports/notes.txt", "Reports/._Q2.numbers",
+               "Reports/__MACOSX/._Q3.numbers", "Reports/.hidden/Q4.numbers", "Reports/a/Inner.numbers",
+               "Reports/Mac.numbers/Index.zip", "Budget.numbers", "readme.md")
+    os.makedirs(os.path.join(root, "Empty"))
+    reports = os.path.join(root, "Reports")
+    loop = os.path.join(reports, "loop")  # a junction back up the tree
+    linked = subprocess.run(["cmd", "/c", "mklink", "/J", loop, reports], capture_output=True).returncode == 0
+    try:
+        assert linked
+        given = [reports, os.path.join(root, "Empty"), os.path.join(root, "Budget.numbers"),
+                 os.path.join(root, "gone.numbers"), os.path.join(root, "readme.md")]
+        found = cli.find(given)
+        assert [(os.path.relpath(f["path"], root), f["folder"]) for f in found["files"]] == [
+            (r"Reports\Mac.numbers", reports), (r"Reports\Q2.numbers", reports), (r"Reports\Q10.numbers", reports),
+            (r"Reports\a\Inner.numbers", reports), ("Budget.numbers", None)]
+        assert (found["skipped"], found["missing"], found["empty"], found["more"]) == ([given[4]], [given[3]], [given[1]], False)
+        # The app opens so many at most, and stops searching trees that are too big.
+        first = cli.find([reports], limit=2)
+        assert [os.path.basename(f["path"]) for f in first["files"]] == ["Mac.numbers", "Q2.numbers"] and first["more"]
+        shallow = cli.find([reports], max_folders=1)
+        assert len(shallow["files"]) == 3 and shallow["more"] and not shallow["empty"]
+        assert nt.handle({"cmd": "find", "paths": [reports], "limit": 1})["files"] == [{"path": first["files"][0]["path"], "folder": reports}]
+    finally:
+        if linked:
+            os.rmdir(loop)  # the link, not what it leads to
+
+
+def test_command_wildcards():
+    # Windows' shells pass * and ? on as they are, so the command matches them itself; [ ] are plain.
+    root = tempfile.mkdtemp(prefix="wildcards-", dir=OUT)
+    make_files(root, "[2024]/B.numbers", "[2024]/A.numbers", "[2024]/c.txt", "[2024]/Sub/D.numbers")
+    folder = os.path.join(root, "[2024]")
+    paths, unmatched = cli.expand([os.path.join(folder, "*"), os.path.join(root, "*.numbers"), os.path.join(folder, "A.numbers")])
+    assert paths == [os.path.join(folder, name) for name in ("A.numbers", "B.numbers", "Sub", "A.numbers")]
+    assert unmatched == [os.path.join(root, "*.numbers")]
+
+
+def test_where_the_command_saves():
+    root = tempfile.mkdtemp(prefix="targets-", dir=OUT)
+    make_files(root, "Reports/Q1/Sales.numbers", "Reports/Q1/Sales.xlsx", "Budget.numbers")
+    reports = os.path.join(root, "Reports")
+    sales = os.path.join(reports, "Q1", "Sales.numbers")
+
+    def run(**options):
+        defaults = {"out": None, "overwrite": False, "dry_run": False, "contents": False, "layout": "separate", "password": None}
+        return cli.Run(SimpleNamespace(**{**defaults, **options}), nt.CLI_TOOLS)
+
+    # Next to the original, never over a file that's there, nor over one the same run saves.
+    beside = run()
+    assert beside.target(sales, reports) == os.path.join(reports, "Q1", "Sales (1).xlsx")
+    assert beside.target(sales, reports) == os.path.join(reports, "Q1", "Sales (2).xlsx")
+    over = run(overwrite=True)
+    assert over.target(sales, reports) == os.path.join(reports, "Q1", "Sales.xlsx")
+    assert over.target(sales, reports) == os.path.join(reports, "Q1", "Sales (1).xlsx")
+    # In --out, in the subfolder each file was found in.
+    elsewhere = run(out=os.path.join(root, "Excel"))
+    assert elsewhere.target(sales, reports) == os.path.join(root, "Excel", "Q1", "Sales.xlsx")
+    assert elsewhere.target(os.path.join(root, "Budget.numbers"), None) == os.path.join(root, "Excel", "Budget.xlsx")
+
+
+def command(*argv):
+    """Runs numbers-converter: (exit code, what it printed, what it printed as errors)."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        try:
+            code = cli.main(list(argv), nt.CLI_TOOLS)
+        except SystemExit as exit_:
+            code = exit_.code
+    return code, out.getvalue(), err.getvalue()
+
+
+def test_command_converts_folders():
+    cli.can_type = lambda: False  # no one is there to type a password
+    root = tempfile.mkdtemp(prefix="command-", dir=OUT)
+    reports, excel = os.path.join(root, "Reports"), os.path.join(root, "Excel")
+    os.makedirs(os.path.join(reports, "Q1"))
+    shutil.copy(fixture("issue-9"), reports)
+    shutil.copy(fixture("encrypted"), os.path.join(reports, "Q1"))
+    shutil.copy(fixture("create-formulas"), os.path.join(reports, "Q1", "Formulas.numbers"))
+
+    # A dry run saves nothing, and says what would change.
+    code, printed, _ = command(reports, "--out", excel, "--dry-run")
+    assert code == 1 and not os.path.exists(excel), printed  # 1: the locked file
+    assert f"Would save  {os.path.join(excel, 'issue-9.xlsx')} — 1 change to check: 1 chart can’t be converted\n" in printed
+    assert printed.endswith("2 files ready to save, 1 locked. Nothing was saved.\n")
+
+    # The locked file is reported, and the others saved, in the subfolders they were found in.
+    code, printed, _ = command(reports, "--out", excel, "--json")
+    summary = json.loads(printed)
+    assert code == 1 and (summary["saved"], summary["locked"], summary["failed"]) == (2, 1, 0)
+    nine, locked, formulas = summary["files"]
+    assert (nine["status"], nine["output"], nine["charts"]) == ("saved", os.path.join(excel, "issue-9.xlsx"), 10)
+    assert [change["kind"] for change in nine["changes"]] == ["charts"]
+    assert (locked["status"], locked["hint"], locked["input"]) == ("locked", "s3cr3t", os.path.join(reports, "Q1", "encrypted.numbers"))
+    separate = load_workbook(os.path.join(excel, "Q1", "Formulas.xlsx")).sheetnames
+
+    # With the password: the locked file too, and the others beside their first copies.
+    password = os.path.join(root, "password.txt")
+    with open(password, "w", encoding="utf-8") as f:
+        f.write("s3cr3t\n")
+    code, printed, _ = command(reports, "--out", excel, "--password-file", password, "--layout", "one", "--contents")
+    assert code == 0, printed
+    assert os.path.isfile(os.path.join(excel, "Q1", "encrypted.xlsx"))
+    together = load_workbook(os.path.join(excel, "Q1", "Formulas (1).xlsx")).sheetnames
+    assert together[0] == "Contents" and len(together) < len(separate)
+    assert printed.endswith("3 saved.\n")
+    # --overwrite writes over them instead.
+    assert command(os.path.join(reports, "issue-9.numbers"), "--out", excel, "--overwrite")[0] == 0
+    assert not os.path.exists(os.path.join(excel, "issue-9 (2).xlsx"))
+
+    # Exit code 2 when there's nothing to convert or the command has a mistake in it; 1 for a file that isn't there.
+    os.makedirs(os.path.join(root, "Nothing"))
+    code, _, errors = command(os.path.join(root, "Nothing"))
+    assert code == 2 and "No Numbers files in" in errors
+    code, printed, _ = command(os.path.join(root, "gone.numbers"))
+    assert code == 1 and "This file doesn’t exist." in printed
+    assert command("--layout", "sideways", reports)[0] == 2
+    assert command()[0] == 2
 
 
 if __name__ == "__main__":

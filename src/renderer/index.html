@@ -25,13 +25,13 @@
     <section class="view start" id="view-start">
       <div class="drop-card" id="drop">
         <svg class="drop-icon" width="48" height="48" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/><path d="M12 18v-6"/><path d="m9 15 3 3 3-3"/></svg>
-        <h1>Drop Numbers files here</h1>
+        <h1>Drop Numbers files or folders here</h1>
         <p class="lead">Each file opens in a preview first, so you can check it before you save an Excel copy.</p>
         <div class="start-actions">
           <button class="btn primary large" id="pick" title="Choose files (Ctrl+O)">Choose files…</button>
           <span class="hint">or press Ctrl+O</span>
         </div>
-        <button class="link-btn" id="pick-packages">Open a Mac package folder instead</button>
+        <button class="link-btn" id="pick-folder" title="Opens every Numbers file in a folder and its subfolders, or a file a Mac saved as a package folder">Choose a folder instead</button>
         <div class="divider"></div>
         <p class="privacy-line">
           <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.75 2.75 3.6v3.9c0 3.05 2.2 5.55 5.25 6.75 3.05-1.2 5.25-3.7 5.25-6.75V3.6z"/><path d="m5.75 8 1.6 1.6 2.9-3.1"/></svg>
@@ -56,7 +56,7 @@
               <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle class="dot" cx="3.5" cy="8" r="1"/><circle class="dot" cx="8" cy="8" r="1"/><circle class="dot" cx="12.5" cy="8" r="1"/></svg>
             </button>
             <div class="menu" id="more-menu" role="menu" hidden>
-              <button role="menuitem" id="menu-packages">Open a Mac package folder…</button>
+              <button role="menuitem" id="menu-folder" title="Opens every Numbers file in a folder and its subfolders, or a file a Mac saved as a package folder">Add a folder…</button>
               <button role="menuitem" id="menu-clear">Clear the list</button>
             </div>
           </div>
@@ -199,6 +199,14 @@
               <div><dt><kbd>Esc</kbd></dt><dd>Close a panel or go back</dd></div>
               <div><dt><kbd>Ctrl+=</kbd> <kbd>Ctrl+-</kbd></dt><dd>Zoom in or out (<kbd>Ctrl+0</kbd> resets)</dd></div>
             </dl>
+          </div>
+          <div class="row">
+            <div class="row-text">
+              <div class="label">Command line</div>
+              <div class="desc" id="cli-desc"></div>
+              <div class="mono" id="cli-command" hidden></div>
+            </div>
+            <button class="btn" id="cli-copy" hidden>Copy</button>
           </div>
           <div class="row">
             <div class="row-text">

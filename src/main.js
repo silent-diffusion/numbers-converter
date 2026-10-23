@@ -2,7 +2,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu, nativeTheme, clipboard, screen } = require('electron');
-const { convertFile, previewFile, targetPath, stopHelper, setLogger } = require('./convert');
+const { convertFile, previewFile, findFiles, targetPath, stopHelper, setLogger } = require('./convert');
 const settings = require('./settings');
 const updater = require('./updater');
 const log = require('./log');
@@ -99,6 +99,15 @@ function rememberFolder(file) {
   if (file) saveConfig({ lastFolder: path.dirname(file) });
 }
 
+// The numbers-converter command that comes with this copy: on the PATH when Scoop installed it, otherwise
+// numbers-converter.cmd beside the app. None when the app runs from its source folder.
+function commandLine() {
+  if (!app.isPackaged) return null;
+  if (updater.getState().managedBy === 'scoop') return { command: 'numbers-converter', onPath: true };
+  const command = path.join(path.dirname(process.execPath), 'numbers-converter.cmd');
+  return fs.existsSync(command) ? { command, onPath: false } : null;
+}
+
 function start() {
   config = settings.load();
   log.init(path.join(app.getPath('userData'), 'logs'));
@@ -178,7 +187,7 @@ function start() {
   });
   scheduleAutoUpdates();
 
-  ipcMain.handle('app:info', () => ({ version: require('../package.json').version, os: windowsName() }));
+  ipcMain.handle('app:info', () => ({ version: require('../package.json').version, os: windowsName(), commandLine: commandLine() }));
 
   ipcMain.handle('settings:get', () => config);
   ipcMain.handle('settings:set', (_e, patch) => {
@@ -200,10 +209,10 @@ function start() {
     return res.filePaths;
   });
 
-  // Files saved by a Mac as a "package" are folders whose name ends in .numbers.
-  ipcMain.handle('files:pickPackages', async () => {
+  // Folders with Numbers files in them, or files a Mac saved as a "package": a folder whose name ends in .numbers.
+  ipcMain.handle('files:pickFolders', async () => {
     const res = await dialog.showOpenDialog(win, {
-      title: 'Choose a Mac package folder (its name ends in .numbers)',
+      title: 'Choose a folder of Numbers files, or a Mac package folder',
       defaultPath: config.lastFolder || undefined,
       properties: ['openDirectory', 'multiSelections']
     });
@@ -211,6 +220,7 @@ function start() {
     rememberFolder(res.filePaths[0]);
     return res.filePaths;
   });
+  ipcMain.handle('files:find', (_e, paths) => findFiles(paths));
 
   ipcMain.handle('folder:pick', async () => {
     const res = await dialog.showOpenDialog(win, {

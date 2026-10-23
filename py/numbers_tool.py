@@ -1,11 +1,14 @@
 """
 Reads Apple Numbers files and writes formatted Excel workbooks.
 
-Runs as a long-lived helper for the Electron app: one JSON request per line on stdin,
-one JSON response per line on stdout.
+Started with --serve, runs as a long-lived helper for the Electron app: one JSON request per line
+on stdin, one JSON response per line on stdout.
 
   {"id": 1, "cmd": "preview", "path": "C:/x.numbers"}
   {"id": 2, "cmd": "convert", "path": "C:/x.numbers", "out": "C:/x.xlsx", "contents": true}
+  {"id": 3, "cmd": "find", "paths": ["C:/Reports"], "limit": 200}
+
+Started any other way, it's the numbers-converter command (see cli.py).
 """
 
 import base64
@@ -28,6 +31,7 @@ from xlsxwriter.utility import xl_range_abs
 
 import categories
 import charts
+import cli
 import drawings
 import extras
 import highlights
@@ -2483,7 +2487,36 @@ def write_cell(ws, r, c, cell, fmt, layout, sheet_name, stats):
         ws.write_string(r, c, str(value), fmt)
 
 
-# ---------------------------------------------------------------- server
+# ---------------------------------------------------------------- the command line and the server
+
+
+def check(path, password=None, layout_options=None):
+    """What saving the file would change in Excel (see change_report), as its preview reports it."""
+    return preview(path, password, layout_options)["report"]
+
+
+def report(path, password=None, layout_options=None):
+    """What saving the file changed in Excel, after convert() has saved it."""
+    book = load(path, password)
+    return change_report(book, book.layout(layout_options))
+
+
+def app_version():
+    """The app's version: written beside the helper's build (npm run build:helper), or read from the
+    package.json a folder up from py/ when running from source."""
+    try:
+        if getattr(sys, "frozen", False):
+            with open(os.path.join(os.path.dirname(sys.executable), "version.txt"), encoding="utf-8") as f:
+                return f.read().strip()
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "package.json"), encoding="utf-8") as f:
+            return json.load(f)["version"]
+    except (OSError, ValueError, KeyError):
+        return "(unknown version)"
+
+
+# What the numbers-converter command (cli.py) needs from here.
+CLI_TOOLS = SimpleNamespace(convert=convert, check=check, report=report, UserError=UserError, technical=technical,
+                            version=app_version())
 
 
 def handle(request):
@@ -2493,14 +2526,22 @@ def handle(request):
     if cmd == "convert":
         return convert(request["path"], request["out"], request.get("password"), request.get("layout"),
                        bool(request.get("contents")))
+    if cmd == "find":
+        return cli.find(request["paths"], request.get("limit"), request.get("maxFolders"))
     if cmd == "ping":
         return {}
     raise UserError(f"Unknown command: {cmd}")
 
 
 def main():
-    stdout = open(sys.stdout.fileno(), "w", encoding="utf-8", newline="\n", closefd=False)
     warnings.showwarning = lambda *args, **kwargs: None  # numbers-parser's notes (e.g. unknown fonts) aren't errors
+    if sys.argv[1:] != ["--serve"]:
+        sys.exit(cli.main(sys.argv[1:], CLI_TOOLS))
+    serve()
+
+
+def serve():
+    stdout = open(sys.stdout.fileno(), "w", encoding="utf-8", newline="\n", closefd=False)
     for line in sys.stdin.buffer:
         line = line.strip()
         if not line:

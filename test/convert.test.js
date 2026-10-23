@@ -3,7 +3,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { convertFile, previewFile, targetPath, stopHelper } = require('../src/convert');
+const { convertFile, previewFile, findFiles, targetPath, stopHelper } = require('../src/convert');
 
 const fixture = (name) => path.join(__dirname, 'fixtures', `${name}.numbers`);
 
@@ -86,6 +86,20 @@ const fixture = (name) => path.join(__dirname, 'fixtures', `${name}.numbers`);
 
   const notNumbers = await previewFile(first.outputPath);
   assert.ok(!notNumbers.ok && /Not a \.numbers file/.test(notNumbers.error));
+
+  // A folder that's opened is searched, with its subfolders, for the Numbers files in it.
+  const folder = path.join(dir, 'Reports');
+  fs.mkdirSync(path.join(folder, 'Q1'), { recursive: true });
+  fs.copyFileSync(fixture('test-styles'), path.join(folder, 'Q1', 'Styles.numbers'));
+  fs.cpSync(fixture('folder-package'), path.join(folder, 'Package.numbers'), { recursive: true });
+  fs.writeFileSync(path.join(folder, 'notes.txt'), 'not a spreadsheet');
+  const found = await findFiles([folder, path.join(folder, 'notes.txt'), path.join(dir, 'Gone')]);
+  assert.ok(found.ok, found.error);
+  assert.deepStrictEqual(found.files, [
+    { path: path.join(folder, 'Package.numbers'), folder },
+    { path: path.join(folder, 'Q1', 'Styles.numbers'), folder }
+  ]);
+  assert.deepStrictEqual([found.skipped, found.missing, found.more], [[path.join(folder, 'notes.txt')], [path.join(dir, 'Gone')], false]);
 
   stopHelper();
   fs.rmSync(dir, { recursive: true, force: true });

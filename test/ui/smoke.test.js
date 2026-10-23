@@ -1,8 +1,9 @@
 // Smoke test of the app's window. It starts the packaged app (dist/win-unpacked, built by `npm run dist`)
 // and uses it as someone would, through Playwright: files opened the way "Open with" opens them and from
-// the window, their previews, "What changes in Excel", the layout switch, a locked file, a damaged one,
-// saving and Settings. Any uncaught error or console error fails it. Every .numbers file in test/fixtures
-// is opened, previewed sheet by sheet and saved; expectations.js lists what particular files must show.
+// the window, folders dropped or chosen, their previews, "What changes in Excel", the layout switch, a
+// locked file, a damaged one, saving and Settings. Any uncaught error or console error fails it. Every
+// .numbers file in test/fixtures is opened, previewed sheet by sheet and saved; expectations.js lists
+// what particular files must show.
 //
 //   node test/ui/smoke.test.js              the app in dist/win-unpacked
 //   node test/ui/smoke.test.js --source     the app in src/, with the Python helper in .venv (no build)
@@ -38,6 +39,11 @@ const SCRATCH = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'nc
 const PROFILE = path.join(SCRATCH, 'profile');
 const WORK = path.join(SCRATCH, 'Café & Co – Q3');
 const DAMAGED = path.join(WORK, 'Damaged.numbers');
+// Folders of Numbers files to open: one with a subfolder and things to leave out, and one with none at all.
+const ARCHIVE = path.join(SCRATCH, 'Archive 2024');
+const ARCHIVE_FILES = [path.join(ARCHIVE, 'Budget.numbers'), path.join(ARCHIVE, 'Q1', 'Sales.numbers')];
+const MORE = path.join(SCRATCH, 'More');
+const NOTHING = path.join(SCRATCH, 'Nothing here');
 const LOG = path.join(PROFILE, 'logs', 'numbers-converter.log');
 
 // Every .numbers file (or Mac package folder) in test/fixtures and the folders under it, by its path there.
@@ -80,6 +86,14 @@ function setUp() {
   fs.cpSync(path.join(FIXTURES, 'folder-package.numbers'), DAMAGED, { recursive: true });
   fs.writeFileSync(path.join(DAMAGED, 'Index.zip'), 'not a zip archive');
   fs.writeFileSync(path.join(WORK, 'notes.txt'), 'not a spreadsheet');
+  fs.mkdirSync(path.join(ARCHIVE, 'Q1'), { recursive: true });
+  fs.copyFileSync(path.join(FIXTURES, 'test-styles.numbers'), ARCHIVE_FILES[0]);
+  fs.copyFileSync(path.join(FIXTURES, 'images.numbers'), ARCHIVE_FILES[1]);
+  fs.writeFileSync(path.join(ARCHIVE, '._Budget.numbers'), 'what a Mac leaves on a drive');
+  fs.writeFileSync(path.join(ARCHIVE, 'notes.txt'), 'not a spreadsheet');
+  fs.mkdirSync(MORE);
+  fs.copyFileSync(path.join(FIXTURES, 'issue-9.numbers'), path.join(MORE, 'Charts.numbers'));
+  fs.mkdirSync(NOTHING);
   // Automatic update checks are off too, in case a build ever looks installed.
   fs.mkdirSync(PROFILE);
   fs.writeFileSync(path.join(PROFILE, 'settings.json'), JSON.stringify({ autoUpdate: false }));
@@ -107,10 +121,10 @@ async function launch(files) {
     throw new Error(`The app isn’t using the scratch profile (it uses ${started.userData}), so it was stopped.`);
   }
 
-  // File dialogs answer with the files the test queues (pick()), and `shell` only records what it's asked
-  // to open: nothing opens in Excel, Explorer or the browser.
-  await electronApp.evaluate(({ dialog, shell }) => {
-    const calls = { picks: [], dialogs: [], opened: [], revealed: [], links: [], rejections: [] };
+  // File dialogs answer with the files the test queues (pick()), and `shell` and the clipboard only record
+  // what they're given: nothing opens in Excel, Explorer or the browser, and the clipboard is left alone.
+  await electronApp.evaluate(({ dialog, shell, clipboard }) => {
+    const calls = { picks: [], dialogs: [], opened: [], revealed: [], links: [], copied: [], rejections: [] };
     globalThis.uiTest = calls;
     const stub = (fn) => Object.assign(fn, { uiTestStub: true });
     dialog.showOpenDialog = stub(async (_window, options) => {
@@ -121,6 +135,7 @@ async function launch(files) {
     shell.openPath = stub(async (p) => { calls.opened.push(p); return ''; });
     shell.showItemInFolder = stub((p) => { calls.revealed.push(p); });
     shell.openExternal = stub(async (url) => { calls.links.push(url); });
+    clipboard.writeText = stub((text) => { calls.copied.push(text); });
     process.on('unhandledRejection', (reason) => calls.rejections.push(String(reason?.stack || reason)));
   });
 
@@ -235,6 +250,25 @@ async function eventually(what, fn, timeout = 10000) {
 }
 
 const seconds = (since) => `${((Date.now() - since) / 1000).toFixed(1)} s`;
+
+// Drops files and folders onto the preview, as dragging them from Explorer does.
+async function drop(paths) {
+  const cdp = await win.context().newCDPSession(win);
+  const box = await win.locator('#pv-grid').boundingBox();
+  const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  const data = { items: [], files: paths, dragOperationsMask: 1 };
+  for (const type of ['dragEnter', 'dragOver', 'drop']) await cdp.send('Input.dispatchDragEvent', { type, ...at, data });
+  await cdp.detach();
+}
+
+// The toast's text, closed once read. It hides itself after 7 s, so it's read before anything slower.
+async function toastText() {
+  await win.locator('#toast').waitFor();
+  const text = await win.locator('#toast-text').textContent();
+  await win.locator('#toast-close').click();
+  return text;
+}
+
 const readSettings = () => JSON.parse(fs.readFileSync(path.join(PROFILE, 'settings.json'), 'utf8'));
 const pick = (paths) => electronApp.evaluate((_electron, p) => { globalThis.uiTest.picks.push(p); }, paths);
 const testCalls = () => electronApp.evaluate(() => globalThis.uiTest);
@@ -482,16 +516,8 @@ const STEPS = [
 
   ['Dropping files opens the Numbers files and skips the rest', async () => {
     const images = fixture('images.numbers');
-    const cdp = await win.context().newCDPSession(win);
-    const box = await win.locator('#pv-grid').boundingBox();
-    const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
-    const data = { items: [], files: [images.path, path.join(WORK, 'notes.txt')], dragOperationsMask: 1 };
-    for (const type of ['dragEnter', 'dragOver', 'drop']) await cdp.send('Input.dispatchDragEvent', { type, ...at, data });
-    await cdp.detach();
-    // The toast shows at once and hides itself after 7 s, so it's checked before the file has opened.
-    await win.locator('#toast').waitFor();
-    assert.strictEqual(await win.locator('#toast-text').textContent(), 'Skipped 1 item that isn’t a Numbers file: notes.txt.');
-    await win.locator('#toast-close').click();
+    await drop([images.path, path.join(WORK, 'notes.txt')]);
+    assert.strictEqual(await toastText(), 'Skipped 1 item that isn’t a Numbers file: notes.txt.');
     await settled([images.path]);
   }],
 
@@ -590,6 +616,29 @@ const STEPS = [
     assert.strictEqual(await win.locator('#files-summary').textContent(), `${FILES.length + 1} · ${readable.length} saved`);
   }],
 
+  ['Dropping a folder opens the Numbers files in it and its subfolders', async () => {
+    const before = await win.locator('#list li').count();
+    await drop([ARCHIVE, NOTHING]);
+    assert.strictEqual(await toastText(), 'No Numbers files in Nothing here.');
+    await settled(ARCHIVE_FILES);
+    // In name order, a folder's own files before its subfolders'; what a Mac leaves behind isn't opened.
+    const listed = await win.locator('#list .file-row').evaluateAll((rows) => rows.map((r) => r.title));
+    assert.deepStrictEqual(listed.slice(before), ARCHIVE_FILES);
+    assert.ok((await rowState(ARCHIVE_FILES[0])).selected, 'the first file of the folder isn’t selected');
+    for (const p of ARCHIVE_FILES) assert.strictEqual((await rowState(p)).status, 'ready', `${p}: “${(await rowState(p)).text}”`);
+  }],
+
+  ['Add a folder opens a folder from the folder dialog', async () => {
+    const charts = path.join(MORE, 'Charts.numbers');
+    await pick([MORE]);
+    await win.locator('#more').click();
+    await win.locator('#menu-folder').click();
+    await settled([charts]);
+    assert.ok((await rowState(charts)).selected, 'Charts.numbers isn’t selected');
+    const { dialogs } = await testCalls();
+    assert.strictEqual(dialogs.at(-1).title, 'Choose a folder of Numbers files, or a Mac package folder');
+  }],
+
   ['Settings opens, and its switches are saved', async () => {
     await win.locator('#settings-btn').click();
     await win.locator('#view-settings').waitFor();
@@ -602,6 +651,22 @@ const STEPS = [
       await until('the Contents sheet switch to flip', (on) => document.querySelector('#contents').getAttribute('aria-checked') === String(on), on);
       assert.strictEqual(await win.locator('#contents-word').textContent(), on ? 'On' : 'Off');
       await eventually('the Contents sheet setting to be saved', () => readSettings().contentsSheet === on);
+    }
+    // How to run the numbers-converter command that comes with the app, ready to copy.
+    const command = win.locator('#cli-command');
+    if (SOURCE) {
+      assert.ok(await command.isHidden(), 'the app in src/ shows a command it doesn’t have');
+    } else {
+      const cmd = path.join(path.dirname(EXE), 'numbers-converter.cmd');
+      assert.ok(fs.existsSync(cmd), 'numbers-converter.cmd isn’t beside the app');
+      assert.strictEqual(await command.textContent(), `& "${cmd}" --help`);
+      await win.locator('#cli-copy').click();
+      const { copied } = await eventually('the command to be copied', async () => {
+        const recorded = await testCalls();
+        return recorded.copied.length && recorded;
+      });
+      assert.deepStrictEqual(copied, [`& "${cmd}" --help`]);
+      await toastText();
     }
     await win.keyboard.press('Escape');
     await win.locator('#view-files').waitFor();
@@ -626,7 +691,7 @@ const STEPS = [
     await win.reload();
     await win.locator('#view-start').waitFor();
     await until('the window to start', () => document.querySelector('#version-label').textContent);
-    assert.strictEqual(await win.locator('#view-start h1').textContent(), 'Drop Numbers files here');
+    assert.strictEqual(await win.locator('#view-start h1').textContent(), 'Drop Numbers files or folders here');
     assert.strictEqual(await win.locator('#out-hint').textContent(), 'Excel copies are saved next to the originals.');
   }],
 
